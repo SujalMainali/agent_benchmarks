@@ -31,7 +31,7 @@ class ResearchHelperAgent:
             messages.append(SystemMessage(content=f"Working summary:\n{self.memory.summary}"))
 
         if self.memory.facts:
-            messages.append(SystemMessage(content=f"Stable facts:\n{self.memory.format_facts()}"))
+            messages.append(SystemMessage(content=f"LOCAL MEMORY facts:\n{self.memory.format_facts()}"))
 
         messages.extend(self.memory.recent_context_messages())
         messages.append(HumanMessage(content=user_text))
@@ -79,7 +79,7 @@ class ResearchHelperAgent:
         self.memory.summary = self._message_content_text(response)
 
     def run_turn(self, user_text: str) -> str:
-        self.memory.extract_stable_facts(user_text)
+        self.memory.extract_stable_facts(user_text, self.chat_model)
 
         working_messages = self.build_context_messages(user_text)
         turn_log: List[BaseMessage] = [HumanMessage(content=user_text)]
@@ -121,7 +121,7 @@ class ResearchHelperAgent:
         """
         Yield step-wise updates for debugging the native tool-calling loop.
         """
-        self.memory.extract_stable_facts(user_text)
+        self.memory.extract_stable_facts(user_text, self.chat_model)
 
         working_messages = self.build_context_messages(user_text)
         turn_log: List[BaseMessage] = [HumanMessage(content=user_text)]

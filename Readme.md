@@ -7,16 +7,18 @@ A small LangChain + Hugging Face project for learning:
 - structured tool calling
 - tool result handling
 - short summary refresh
-- local document and note lookup
+- local document, note, and web lookup
 
 ## What this project does
 
 - Calls a remote Qwen model through Hugging Face
-- Keeps a temporary conversation memory
-- Uses 3 tools:
+- Keeps a temporary conversation memory with LLM-extracted structured facts
+- Uses 4 tools:
   - `calculator`
   - `document_search`
   - `note_lookup`
+  - `web_search`
+- Labels retrieval sources as `local_memory`, `document`, or `web`
 - Updates a short summary every few turns
 - Logs the native message trace, including AI tool requests, `ToolMessage` results, and final AI answers
 
@@ -45,4 +47,5 @@ research-helper/
       ├─ __init__.py
       ├─ calculator.py
       ├─ document_search.py
-      └─ note_lookup.py
+      ├─ note_lookup.py
+      └─ web_search.py

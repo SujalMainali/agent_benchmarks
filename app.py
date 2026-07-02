@@ -93,11 +93,11 @@ def main():
 
         answer = agent.run_turn(user_input)
 
-        print(f"\nAssistant : {answer}\n")
-
         # Useful for learning.
         # Later we can replace this with structured logging.
         memory.print_state()
+
+        print(f"\nAssistant : {answer}\n")
 
 
 if __name__ == "__main__":

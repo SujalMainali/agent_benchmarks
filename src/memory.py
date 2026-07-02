@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-import re
+import json
 from dataclasses import dataclass, field
 from pprint import pformat
 from typing import Any, Dict, List
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from .prompts import FACT_EXTRACTOR_PROMPT
+
 
 @dataclass
 class TemporaryMemory:
     recent_messages: List[BaseMessage] = field(default_factory=list)
     summary: str = ""
-    facts: Dict[str, str] = field(default_factory=dict)
+    facts: List[Dict[str, Any]] = field(default_factory=list)
     tool_results: List[Dict[str, Any]] = field(default_factory=list)
     turn_count: int = 0
 
@@ -20,9 +22,11 @@ class TemporaryMemory:
     recent_window_turns: int = 6
 
     def add_tool_result(self, tool_name: str, args: Dict[str, Any], result: str) -> None:
+        source_type = self._infer_tool_source_type(tool_name, result)
         self.tool_results.append(
             {
                 "tool": tool_name,
+                "source_type": source_type,
                 "args": args,
                 "result": result,
             }
@@ -33,30 +37,131 @@ class TemporaryMemory:
         self.recent_messages.append(AIMessage(content=assistant_text))
         self.turn_count += 1
 
-    def extract_stable_facts(self, user_text: str) -> None:
-        """
-        Very small rule-based extractor for learning.
-        Later, we can replace this with an LLM-based fact extractor.
-        """
-        patterns = [
-            (r"\bmy name is ([^.!\n]+)", "name"),
-            (r"\bi am ([^.!\n]+)", "identity"),
-            (r"\bi like ([^.!\n]+)", "preference"),
-            (r"\bi prefer ([^.!\n]+)", "preference"),
-            (r"\bmy goal is ([^.!\n]+)", "goal"),
-            (r"\bi study ([^.!\n]+)", "study"),
-            (r"\bi live in ([^.!\n]+)", "location"),
-        ]
+    def _json_from_text(self, text: str) -> Dict[str, Any]:
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
 
-        for pattern, key in patterns:
-            match = re.search(pattern, user_text, flags=re.IGNORECASE)
-            if match:
-                self.facts[key] = match.group(1).strip()
+        try:
+            value = json.loads(cleaned)
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            decoder = json.JSONDecoder()
+            for index, char in enumerate(cleaned):
+                if char != "{":
+                    continue
+                try:
+                    value, _ = decoder.raw_decode(cleaned[index:])
+                except json.JSONDecodeError:
+                    continue
+                return value if isinstance(value, dict) else {}
+        return {}
+
+    def _normalize_fact(self, item: Dict[str, Any]) -> Dict[str, Any] | None:
+        fact = str(item.get("fact", "")).strip()
+        value = str(item.get("value", "")).strip()
+        category = str(item.get("category", "other")).strip().lower() or "other"
+
+        if not fact or not value:
+            return None
+
+        try:
+            confidence = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        confidence = max(0.0, min(1.0, confidence))
+
+        return {
+            "fact": fact,
+            "value": value,
+            "confidence": confidence,
+            "category": category,
+            "source_type": "local_memory",
+            "source": "llm_fact_extractor",
+            "last_seen_turn": self.turn_count + 1,
+        }
+
+    def _upsert_fact(self, fact: Dict[str, Any]) -> None:
+        new_key = (fact["category"].lower(), fact["fact"].lower())
+        for index, existing in enumerate(self.facts):
+            existing_key = (
+                str(existing.get("category", "")).lower(),
+                str(existing.get("fact", "")).lower(),
+            )
+            if existing_key == new_key:
+                self.facts[index] = fact
+                return
+        self.facts.append(fact)
+
+    def extract_stable_facts(self, user_text: str, chat_model=None) -> List[Dict[str, Any]]:
+        """
+        Use the LLM to extract durable local-memory facts from a user message.
+        """
+        if chat_model is None:
+            return []
+
+        prompt = FACT_EXTRACTOR_PROMPT.format(user_text=user_text)
+
+        try:
+            response = chat_model.invoke([HumanMessage(content=prompt)])
+        except Exception:
+            return []
+
+        content = response.content if isinstance(response.content, str) else str(response.content)
+        parsed = self._json_from_text(content)
+        raw_facts = parsed.get("facts", [])
+
+        if isinstance(raw_facts, dict):
+            raw_facts = [raw_facts]
+        if not isinstance(raw_facts, list):
+            return []
+
+        extracted = []
+        for item in raw_facts:
+            if not isinstance(item, dict):
+                continue
+            fact = self._normalize_fact(item)
+            if fact is None:
+                continue
+            self._upsert_fact(fact)
+            extracted.append(fact)
+
+        return extracted
 
     def format_facts(self) -> str:
         if not self.facts:
             return "None"
-        return "\n".join(f"- {k}: {v}" for k, v in self.facts.items())
+        lines = []
+        for item in self.facts:
+            lines.append(
+                "- source=LOCAL MEMORY "
+                f"category={item.get('category')} "
+                f"fact={item.get('fact')} "
+                f"value={item.get('value')} "
+                f"confidence={item.get('confidence')}"
+            )
+        return "\n".join(lines)
+
+    def _infer_tool_source_type(self, tool_name: str, result: str) -> str:
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, dict) and parsed.get("source_type"):
+                return str(parsed["source_type"])
+        except json.JSONDecodeError:
+            pass
+
+        return {
+            "document_search": "document",
+            "note_lookup": "local_memory",
+            "web_search": "web",
+            "calculator": "calculation",
+        }.get(tool_name, "tool")
 
     def format_tool_results(self, limit: int = 5) -> str:
         if not self.tool_results:
@@ -65,7 +170,11 @@ class TemporaryMemory:
         lines = []
         for item in self.tool_results[-limit:]:
             lines.append(
-                f"- tool={item['tool']} args={item['args']} result={item['result']}"
+                "- "
+                f"source={item.get('source_type', 'tool')} "
+                f"tool={item['tool']} "
+                f"args={item['args']} "
+                f"result={item['result']}"
             )
         return "\n".join(lines)
 

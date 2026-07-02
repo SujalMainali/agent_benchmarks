@@ -1,6 +1,6 @@
 from pathlib import Path
 import re
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".rst"}
@@ -29,16 +29,16 @@ def _excerpt(text: str, terms: List[str], width: int = 220) -> str:
     return snippet
 
 
-def search_corpus(root: Path, query: str, top_k: int = 3) -> str:
+def search_corpus_results(root: Path, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
     """
-    Search text files under a folder and return a compact ranked result string.
+    Search text files under a folder and return structured ranked results.
     """
     if not root.exists():
-        return f"Search folder does not exist: {root}"
+        return []
 
     terms = _tokenize(query)
     if not terms:
-        return "Please provide a more specific query."
+        return []
 
     scored: List[Tuple[int, Path, str]] = []
 
@@ -58,12 +58,40 @@ def search_corpus(root: Path, query: str, top_k: int = 3) -> str:
             scored.append((score, path, _excerpt(content, terms)))
 
     if not scored:
-        return "No relevant matches found."
+        return []
 
     scored.sort(key=lambda item: item[0], reverse=True)
 
-    lines = []
+    results = []
     for score, path, excerpt in scored[:top_k]:
-        lines.append(f"[{path.name}] score={score}\n{excerpt}")
+        results.append(
+            {
+                "title": path.name,
+                "path": str(path),
+                "score": score,
+                "snippet": excerpt,
+            }
+        )
+    return results
+
+
+def search_corpus(root: Path, query: str, top_k: int = 3) -> str:
+    """
+    Search text files under a folder and return a compact ranked result string.
+    """
+    if not root.exists():
+        return f"Search folder does not exist: {root}"
+
+    terms = _tokenize(query)
+    if not terms:
+        return "Please provide a more specific query."
+
+    results = search_corpus_results(root, query, top_k=top_k)
+    if not results:
+        return "No relevant matches found."
+
+    lines = []
+    for item in results:
+        lines.append(f"[{item['title']}] score={item['score']}\n{item['snippet']}")
 
     return "\n\n".join(lines)
