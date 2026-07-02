@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from typing import Dict, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_huggingface import ChatHuggingFace
 
 from .memory import TemporaryMemory
-from .prompts import SUMMARY_PROMPT, SYSTEM_PROMPT, TOOL_PROTOCOL_PROMPT
-from .utils.json_utils import extract_json_object, normalize_response_object
+from .prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
 
 
 class ResearchHelperAgent:
@@ -18,16 +17,15 @@ class ResearchHelperAgent:
         memory: TemporaryMemory | None = None,
         max_tool_steps: int = 3,
     ) -> None:
+        tool_list = list(tools)
         self.chat_model = chat_model
-        self.tools = {tool.name: tool for tool in tools}
+        self.tool_model = chat_model.bind_tools(tool_list)
+        self.tools = {tool.name: tool for tool in tool_list}
         self.memory = memory or TemporaryMemory()
         self.max_tool_steps = max_tool_steps
 
     def build_context_messages(self, user_text: str) -> List[BaseMessage]:
-        messages: List[BaseMessage] = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            SystemMessage(content=TOOL_PROTOCOL_PROMPT),
-        ]
+        messages: List[BaseMessage] = [SystemMessage(content=SYSTEM_PROMPT)]
 
         if self.memory.summary.strip():
             messages.append(SystemMessage(content=f"Working summary:\n{self.memory.summary}"))
@@ -35,27 +33,42 @@ class ResearchHelperAgent:
         if self.memory.facts:
             messages.append(SystemMessage(content=f"Stable facts:\n{self.memory.format_facts()}"))
 
-        if self.memory.tool_results:
-            messages.append(
-                SystemMessage(content=f"Recent tool outputs:\n{self.memory.format_tool_results()}")
-            )
-
-        messages.extend(self.memory.recent_messages[-self.memory.recent_window_turns * 2 :])
+        messages.extend(self.memory.recent_context_messages())
         messages.append(HumanMessage(content=user_text))
         return messages
 
-    def _execute_tool(self, tool_name: str, arguments: Dict) -> str:
+    def _message_content_text(self, message: BaseMessage) -> str:
+        content = message.content
+        if isinstance(content, str):
+            return content.strip()
+        return str(content).strip()
+
+    def _execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         tool = self.tools.get(tool_name)
         if tool is None:
             return f"Error: unknown tool '{tool_name}'."
 
         if not isinstance(arguments, dict):
-            return "Error: tool arguments must be a JSON object."
+            return "Error: tool arguments must be a dictionary."
 
         try:
             return str(tool.invoke(arguments))
         except Exception as exc:
             return f"Tool execution error: {exc}"
+
+    def _execute_tool_call(self, tool_call: Dict[str, Any]) -> ToolMessage:
+        tool_name = tool_call.get("name", "")
+        arguments = tool_call.get("args", {})
+        tool_call_id = tool_call.get("id") or f"{tool_name}_{self.memory.turn_count + 1}"
+
+        result = self._execute_tool(tool_name, arguments)
+        self.memory.add_tool_result(tool_name, arguments, result)
+
+        return ToolMessage(
+            content=result,
+            name=tool_name,
+            tool_call_id=tool_call_id,
+        )
 
     def _refresh_summary(self) -> None:
         prompt = SUMMARY_PROMPT.format(
@@ -63,7 +76,7 @@ class ResearchHelperAgent:
             recent_dialogue=self.memory.format_recent_dialogue(),
         )
         response = self.chat_model.invoke([HumanMessage(content=prompt)])
-        self.memory.summary = response.content.strip()
+        self.memory.summary = self._message_content_text(response)
 
     def run_turn(self, user_text: str) -> str:
         self.memory.extract_stable_facts(user_text)
@@ -73,49 +86,29 @@ class ResearchHelperAgent:
 
         final_answer = ""
 
-        for step in range(self.max_tool_steps):
+        for _ in range(self.max_tool_steps):
+            response = self.tool_model.invoke(working_messages)
+            working_messages.append(response)
+            turn_log.append(response)
+
+            tool_calls = getattr(response, "tool_calls", [])
+            if not tool_calls:
+                final_answer = self._message_content_text(response)
+                break
+
+            tool_messages = [self._execute_tool_call(tool_call) for tool_call in tool_calls]
+            working_messages.extend(tool_messages)
+            turn_log.extend(tool_messages)
+        else:
             response = self.chat_model.invoke(working_messages)
-            raw_text = response.content.strip()
-
-            parsed = extract_json_object(raw_text)
-            if parsed is None:
-                # Fallback: treat the model output as the final answer.
-                final_answer = raw_text
-                break
-
-            normalized = normalize_response_object(parsed)
-
-            if normalized["type"] == "final":
-                final_answer = normalized["answer"].strip()
-                break
-
-            if normalized["type"] == "tool_call":
-                tool_name = normalized["tool_name"]
-                arguments = normalized["arguments"]
-
-                tool_call_message = AIMessage(content=raw_text)
-                working_messages.append(tool_call_message)
-
-                result = self._execute_tool(tool_name, arguments)
-                self.memory.add_tool_result(tool_name, arguments, result)
-
-                tool_message = ToolMessage(
-                    content=result,
-                    name=tool_name,
-                    tool_call_id=f"{tool_name}_{self.memory.turn_count + 1}_{step + 1}",
-                )
-                working_messages.append(tool_message)
-
-                turn_log.append(tool_message)
-                continue
-
-            final_answer = raw_text
-            break
+            working_messages.append(response)
+            turn_log.append(response)
+            final_answer = self._message_content_text(response)
 
         if not final_answer:
             final_answer = "I could not produce a final answer."
+            turn_log.append(AIMessage(content=final_answer))
 
-        turn_log.append(AIMessage(content=final_answer))
         self.memory.recent_messages.extend(turn_log)
         self.memory.turn_count += 1
 
@@ -123,3 +116,53 @@ class ResearchHelperAgent:
             self._refresh_summary()
 
         return final_answer
+
+    def stream_turn_updates(self, user_text: str):
+        """
+        Yield step-wise updates for debugging the native tool-calling loop.
+        """
+        self.memory.extract_stable_facts(user_text)
+
+        working_messages = self.build_context_messages(user_text)
+        turn_log: List[BaseMessage] = [HumanMessage(content=user_text)]
+
+        yield {"step": "user", "messages": [turn_log[0]]}
+
+        final_answer = ""
+
+        for _ in range(self.max_tool_steps):
+            response = self.tool_model.invoke(working_messages)
+            working_messages.append(response)
+            turn_log.append(response)
+
+            tool_calls = getattr(response, "tool_calls", [])
+            yield {"step": "model", "messages": [response], "tool_calls": tool_calls}
+
+            if not tool_calls:
+                final_answer = self._message_content_text(response)
+                break
+
+            tool_messages = [self._execute_tool_call(tool_call) for tool_call in tool_calls]
+            working_messages.extend(tool_messages)
+            turn_log.extend(tool_messages)
+            yield {"step": "tools", "messages": tool_messages}
+        else:
+            response = self.chat_model.invoke(working_messages)
+            working_messages.append(response)
+            turn_log.append(response)
+            final_answer = self._message_content_text(response)
+            yield {"step": "final", "messages": [response]}
+
+        if not final_answer:
+            final_answer = "I could not produce a final answer."
+            final_message = AIMessage(content=final_answer)
+            turn_log.append(final_message)
+            yield {"step": "final", "messages": [final_message]}
+
+        self.memory.recent_messages.extend(turn_log)
+        self.memory.turn_count += 1
+
+        if self.memory.should_refresh_summary():
+            self._refresh_summary()
+
+        yield {"step": "done", "answer": final_answer}

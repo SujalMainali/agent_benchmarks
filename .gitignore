@@ -1,2 +1,5 @@
-AgentEnv/*
+AgentEnv
 .env
+data/documents/*
+data/notes/*
+__pycache__

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pprint import pformat
 from typing import Any, Dict, List
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -68,18 +69,61 @@ class TemporaryMemory:
             )
         return "\n".join(lines)
 
+    def recent_context_messages(self) -> List[BaseMessage]:
+        # Keep tool-call request/result pairs intact for the next model call.
+        return self.recent_messages
+
+    def _content_text(self, msg: BaseMessage) -> str:
+        content = msg.content
+        if isinstance(content, str):
+            return content
+        return pformat(content, width=100)
+
+    def _format_message_trace(self, index: int, msg: BaseMessage) -> str:
+        role = getattr(msg, "type", "message")
+        content = self._content_text(msg).strip() or "<empty>"
+        lines = [f"{index:02d}. {role}: {content}"]
+
+        metadata = {}
+        if getattr(msg, "id", None):
+            metadata["id"] = msg.id
+        if getattr(msg, "name", None):
+            metadata["name"] = msg.name
+        if getattr(msg, "tool_call_id", None):
+            metadata["tool_call_id"] = msg.tool_call_id
+        if getattr(msg, "status", None):
+            metadata["status"] = msg.status
+        if getattr(msg, "tool_calls", None):
+            metadata["tool_calls"] = msg.tool_calls
+        if getattr(msg, "invalid_tool_calls", None):
+            metadata["invalid_tool_calls"] = msg.invalid_tool_calls
+        if getattr(msg, "usage_metadata", None):
+            metadata["usage_metadata"] = msg.usage_metadata
+        if getattr(msg, "response_metadata", None):
+            metadata["response_metadata"] = msg.response_metadata
+
+        for key, value in metadata.items():
+            lines.append(f"    {key}: {pformat(value, width=100)}")
+
+        return "\n".join(lines)
+
     def format_recent_dialogue(self, window_messages: int | None = None) -> str:
         if not self.recent_messages:
             return "No recent dialogue."
 
         if window_messages is None:
-            window_messages = self.recent_window_turns * 2
+            window_messages = self.recent_window_turns * 4
 
         selected = self.recent_messages[-window_messages:]
         lines = []
         for msg in selected:
-            role = getattr(msg, "type", "message")
-            lines.append(f"{role.upper()}: {msg.content}")
+            role = getattr(msg, "type", "message").upper()
+            content = self._content_text(msg).strip() or "<empty>"
+            lines.append(f"{role}: {content}")
+            if getattr(msg, "tool_calls", None):
+                lines.append(f"TOOL_CALLS: {pformat(msg.tool_calls, width=100)}")
+            if getattr(msg, "tool_call_id", None):
+                lines.append(f"TOOL_CALL_ID: {msg.tool_call_id}")
         return "\n".join(lines)
 
     def should_refresh_summary(self) -> bool:
@@ -97,6 +141,6 @@ class TemporaryMemory:
         if not self.recent_messages:
             print("None")
         else:
-            for i, msg in enumerate(self.recent_messages[-self.recent_window_turns * 2 :], start=1):
-                print(f"{i:02d}. {msg.type}: {msg.content}")
+            for i, msg in enumerate(self.recent_context_messages(), start=1):
+                print(self._format_message_trace(i, msg))
         print("======================================\n")

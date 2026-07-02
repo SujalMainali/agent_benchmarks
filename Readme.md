@@ -18,7 +18,7 @@ A small LangChain + Hugging Face project for learning:
   - `document_search`
   - `note_lookup`
 - Updates a short summary every few turns
-- Logs tool outputs separately from chat history
+- Logs the native message trace, including AI tool requests, `ToolMessage` results, and final AI answers
 
 ## Project structure
 
@@ -27,12 +27,12 @@ research-helper/
 ├─ .env
 ├─ .env.example
 ├─ requirements.txt
-├─ README.md
+├─ Readme.md
 ├─ app.py
 ├─ data/
 │  ├─ documents/
 │  └─ notes/
-└─ research_helper/
+└─ src/
    ├─ __init__.py
    ├─ config.py
    ├─ prompts.py
@@ -40,7 +40,6 @@ research-helper/
    ├─ agent.py
    ├─ utils/
    │  ├─ __init__.py
-   │  ├─ json_utils.py
    │  └─ corpus_search.py
    └─ tools/
       ├─ __init__.py
