@@ -2,4 +2,5 @@ AgentEnv
 .env
 data/documents/*
 data/notes/*
+data/locomo/*
 __pycache__
