@@ -5,11 +5,10 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-
 from benchmarks.common.logger import BenchmarkLogger
-from benchmarks.common.models import BenchmarkSample, RunResult
-from src.memory import TemporaryMemory
+from benchmarks.common.models import Action, BenchmarkSample, Episode, RunResult, TrajectoryEvent
+from benchmarks.locomo.environment import LoCoMoEnvironment
+from src.runtime import ResearchHelperAgentRuntime
 
 if TYPE_CHECKING:
     from src.agent import ResearchHelperAgent
@@ -18,25 +17,29 @@ if TYPE_CHECKING:
 class LoCoMoRunner:
     """Runs LoCoMo samples through the ResearchHelperAgent."""
 
-    def __init__(self, agent: ResearchHelperAgent) -> None:
+    def __init__(self, agent: ResearchHelperAgent | ResearchHelperAgentRuntime) -> None:
         """
         Initialize the runner.
 
         Args:
             agent: ResearchHelperAgent instance to use for inference.
         """
-        self.agent = agent
+        if isinstance(agent, ResearchHelperAgentRuntime):
+            self.runtime = agent
+        else:
+            self.runtime = ResearchHelperAgentRuntime(agent)
+        self.environment = LoCoMoEnvironment()
 
-    def run_sample(self, sample: BenchmarkSample, log: Optional[BenchmarkLogger] = None) -> RunResult:
+    def run_sample(self, sample: BenchmarkSample | Episode, log: Optional[BenchmarkLogger] = None) -> RunResult:
         """
-        Run a single LoCoMo sample through the agent.
+        Run a single LoCoMo sample through the runtime/environment pair.
 
         The flow:
-        1. Reset the agent's memory
-        2. Load context messages from the sample's conversation history
-        3. Replay all context messages with role-preserving add_message
-        4. Ask the final LoCoMo question
-        5. Collect the trajectory
+        1. Reset the environment
+        2. Reset the runtime with the initial environment snapshot
+        3. Observe the final benchmark question
+        4. Act once
+        5. Collect the trajectory and raw trace
 
         Args:
             sample: BenchmarkSample to run.
@@ -46,67 +49,48 @@ class LoCoMoRunner:
             RunResult with predicted answer and full trajectory.
         """
         if log is None:
-            log = BenchmarkLogger(sample.sample_id)
+            log = BenchmarkLogger(getattr(sample, "sample_id", getattr(sample, "episode_id", "unknown")))
 
-        # Reset memory for clean state
-        self.agent.memory = TemporaryMemory()
+        episode = sample.to_episode() if isinstance(sample, BenchmarkSample) else sample
+        initial_state = self.environment.reset(episode)
+        self.runtime.reset(episode, initial_state)
 
-        # Reconstruct agent input using the adapter
-        from .adapter import LoCoMoAdapter
+        observation = self.environment.observe()
+        context_turn_count = sum(1 for msg in observation.messages if getattr(msg, "type", "") == "human")
 
-        adapter = LoCoMoAdapter()
-        agent_input = adapter.build_agent_input(sample)
+        log.log_environment_snapshot(initial_state)
+        log.log_observation(observation)
+        log.log_question(observation.text, metadata={"sample_id": episode.episode_id, "benchmark_mode": episode.mode})
 
-        # Get context messages (with role-preserved HumanMessage and AIMessage)
-        context_messages = agent_input.get("context_messages", [])
-        context_turn_count = agent_input.get("context_turn_count", 0)
-        
-        # Replay context messages into memory with correct roles
-        for msg in context_messages:
-            self.agent.memory.add_message(msg)
-            # Also log them to the trace
-            log.log_context_message(msg)
-
-        # Run the turn with the final question
-        question = agent_input["question"]
-        gold_answer = agent_input["gold_answer"]
-        benchmark_mode = agent_input["mode"]
-
-        log.log_question(question, metadata={"sample_id": sample.sample_id, "benchmark_mode": benchmark_mode})
-
-        # Log the turn start
-        system_prompts = [
-            self.agent.memory.summary if self.agent.memory.summary.strip() else "No summary",
-        ]
-        if self.agent.memory.facts:
-            system_prompts.append(f"Facts: {self.agent.memory.format_facts()}")
-
-        log.log_turn_start(question, system_prompts)
-
-        # Execute the agent turn
         try:
             start_time = time.time()
-            predicted_answer = self.agent.run_turn(question)
+            action = self.runtime.act(observation)
             latency_ms = (time.time() - start_time) * 1000
+            final_state = self.environment.step(action)
 
-            # Log the result
-            log.log_agent_message(predicted_answer)
-            log.log_memory_state(self._capture_memory_state())
-            log.finalize_turn()
+            predicted_answer = action.text
+            log.log_action(action)
+            log.log_environment_snapshot(final_state)
+
+            trajectory = self.runtime.get_trajectory().events
+            raw_messages = self.runtime.get_raw_messages()
 
             # Build the run result with all required fields
             run_result = RunResult(
-                sample_id=sample.sample_id,
-                question=question,  # Now stored directly
+                sample_id=episode.episode_id,
+                episode_id=episode.episode_id,
+                question=episode.question,
                 predicted_answer=predicted_answer,
-                gold_answer=gold_answer,
-                trajectory=log.trajectory,
-                raw_messages=log.raw_messages,
-                benchmark_mode=benchmark_mode,
+                gold_answer=episode.gold_answer,
+                trajectory=trajectory,
+                raw_messages=raw_messages,
+                benchmark_mode=episode.mode,
                 context_turn_count=context_turn_count,
-                metrics=self._compute_metrics(latency_ms, predicted_answer, context_turn_count),
-                metadata=sample.metadata,
-                total_latency_ms=log.get_total_latency_ms(),
+                metrics=self._compute_metrics(latency_ms, predicted_answer, context_turn_count, trajectory),
+                metadata=episode.metadata,
+                total_latency_ms=latency_ms,
+                episode=episode,
+                final_state=final_state,
             )
 
             return run_result
@@ -115,21 +99,23 @@ class LoCoMoRunner:
             # Log error
             error_msg = f"Error during agent execution: {str(e)}"
             return RunResult(
-                sample_id=sample.sample_id,
-                question=question,
+                sample_id=episode.episode_id,
+                episode_id=episode.episode_id,
+                question=episode.question,
                 predicted_answer="",
-                gold_answer=gold_answer,
-                trajectory=log.trajectory,
-                raw_messages=log.raw_messages,
-                benchmark_mode=benchmark_mode,
+                gold_answer=episode.gold_answer,
+                trajectory=self.runtime.get_trajectory().events,
+                raw_messages=self.runtime.get_raw_messages(),
+                benchmark_mode=episode.mode,
                 context_turn_count=context_turn_count,
-                metadata=sample.metadata,
-                total_latency_ms=log.get_total_latency_ms(),
+                metadata=episode.metadata,
+                total_latency_ms=0.0,
+                episode=episode,
                 error=error_msg,
             )
 
     def run_batch(
-        self, samples: List[BenchmarkSample], verbose: bool = True
+        self, samples: List[BenchmarkSample | Episode], verbose: bool = True
     ) -> List[RunResult]:
         """
         Run multiple samples and collect results.
@@ -151,20 +137,6 @@ class LoCoMoRunner:
 
         return results
 
-    def _feed_context(self, log: BenchmarkLogger, context_messages: List[BaseMessage]) -> None:
-        """
-        Log context messages that are fed to the agent.
-
-        Args:
-            log: BenchmarkLogger instance.
-            context_messages: List of context messages.
-        """
-        for msg in context_messages:
-            if isinstance(msg, HumanMessage):
-                log.log_message("user", msg.content)
-            elif isinstance(msg, AIMessage):
-                log.log_message("assistant", msg.content)
-
     def _capture_memory_state(self) -> Dict[str, Any]:
         """
         Capture the current state of the agent's memory.
@@ -173,14 +145,20 @@ class LoCoMoRunner:
             Dictionary representation of memory state.
         """
         return {
-            "summary": self.agent.memory.summary,
-            "facts": self.agent.memory.facts,
-            "tool_results_count": len(self.agent.memory.tool_results),
-            "recent_messages_count": len(self.agent.memory.recent_messages),
-            "turn_count": self.agent.memory.turn_count,
+            "summary": getattr(self.runtime.agent.memory, "summary", ""),
+            "facts": getattr(self.runtime.agent.memory, "facts", []),
+            "tool_results_count": len(getattr(self.runtime.agent.memory, "tool_results", [])),
+            "recent_messages_count": len(getattr(self.runtime.agent.memory, "recent_messages", [])),
+            "turn_count": getattr(self.runtime.agent.memory, "turn_count", 0),
         }
 
-    def _compute_metrics(self, latency_ms: float, predicted_answer: str, context_turn_count: int) -> Dict[str, Any]:
+    def _compute_metrics(
+        self,
+        latency_ms: float,
+        predicted_answer: str,
+        context_turn_count: int,
+        trajectory: List[TrajectoryEvent],
+    ) -> Dict[str, Any]:
         """
         Compute per-sample metrics.
 
@@ -197,4 +175,6 @@ class LoCoMoRunner:
             "answer_length": len(predicted_answer.split()),
             "answer_char_count": len(predicted_answer),
             "context_turn_count": context_turn_count,
+            "turn_count": len(trajectory),
+            "tool_call_count": sum(len(event.tool_calls) for event in trajectory),
         }

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from benchmarks.common.models import RunResult
+from benchmarks.common.models import EvaluationContext, RunResult
 
 
 class LoCoMoMetrics:
     """Computes metrics for LoCoMo runs."""
 
     @staticmethod
-    def compute_metrics(run_result: RunResult) -> Dict[str, Any]:
+    def compute_metrics(run_result: RunResult | EvaluationContext) -> Dict[str, Any]:
         """
         Compute comprehensive metrics for a single run.
 
@@ -24,7 +24,7 @@ class LoCoMoMetrics:
         - model_latency_ms: time spent in model calls
 
         Args:
-            run_result: The RunResult from agent execution.
+            run_result: The RunResult or EvaluationContext from agent execution.
 
         Returns:
             Dictionary of computed metrics.
@@ -32,12 +32,20 @@ class LoCoMoMetrics:
         metrics = {}
 
         # Answer length metrics
-        answer = run_result.predicted_answer.strip()
+        if isinstance(run_result, EvaluationContext):
+            predicted_answer = run_result.predicted_output
+            trajectory = run_result.trajectory
+            total_latency_ms = run_result.run_result.total_latency_ms if run_result.run_result else 0.0
+        else:
+            predicted_answer = run_result.predicted_answer
+            trajectory = run_result.trajectory
+            total_latency_ms = run_result.total_latency_ms
+
+        answer = predicted_answer.strip()
         metrics["answer_length_chars"] = len(answer)
         metrics["answer_length_words"] = len(answer.split())
 
         # Trajectory metrics
-        trajectory = run_result.trajectory
         metrics["turn_count"] = len(trajectory)
 
         # Tool usage metrics
@@ -45,9 +53,9 @@ class LoCoMoMetrics:
         metrics["tool_call_count"] = total_tool_calls
 
         # Latency metrics
-        metrics["total_latency_ms"] = run_result.total_latency_ms
+        metrics["total_latency_ms"] = total_latency_ms
         metrics["average_turn_latency_ms"] = (
-            run_result.total_latency_ms / len(trajectory) if trajectory else 0
+            total_latency_ms / len(trajectory) if trajectory else 0
         )
 
         # Tool latency
@@ -55,7 +63,7 @@ class LoCoMoMetrics:
             sum(tc.latency_ms for tc in step.tool_calls) for step in trajectory
         )
         metrics["tool_latency_ms"] = tool_latency
-        metrics["model_latency_ms"] = run_result.total_latency_ms - tool_latency
+        metrics["model_latency_ms"] = total_latency_ms - tool_latency
 
         # Tool breakdown by type
         tool_types: Dict[str, int] = {}

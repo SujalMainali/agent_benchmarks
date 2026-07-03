@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from benchmarks.common.models import BenchmarkSample
+from benchmarks.common.models import BenchmarkSample, Episode
 from benchmarks.common.interfaces import BenchmarkAdapter
 
 
@@ -40,7 +40,7 @@ class LoCoMoAdapter(BenchmarkAdapter):
         loader = LoCoMoLoader()
         return loader.load_sample_from_dict(sample_data)
 
-    def build_context_messages(self, sample: BenchmarkSample) -> List[BaseMessage]:
+    def build_context_messages(self, sample: BenchmarkSample | Episode) -> List[BaseMessage]:
         """
         Build the initial context messages from a LoCoMo sample.
 
@@ -48,20 +48,21 @@ class LoCoMoAdapter(BenchmarkAdapter):
         role-preserving messages: HumanMessage for user turns, AIMessage for assistant turns.
 
         Args:
-            sample: The BenchmarkSample.
+            sample: The BenchmarkSample or Episode.
         Returns:
             List of messages to prepend to the agent's context with correct roles.
         """
+        episode = sample.to_episode() if isinstance(sample, BenchmarkSample) else sample
         messages: List[BaseMessage] = []
 
-        sessions = sample.context.get("sessions", [])
-        conversation = sample.context.get("conversation", {})
+        sessions = episode.context.get("sessions", [])
+        conversation = episode.context.get("conversation", {})
         speaker_a = conversation.get("speaker_a")
         speaker_b = conversation.get("speaker_b")
 
         for session in sessions:
             turns = session.get("turns", []) if isinstance(session, dict) else session
-            for index, turn in enumerate(turns):
+            for turn in turns:
                 if not isinstance(turn, dict):
                     continue
 
@@ -71,24 +72,24 @@ class LoCoMoAdapter(BenchmarkAdapter):
 
                 speaker = turn.get("speaker") or turn.get("role") or turn.get("author")
 
-                if speaker_b and speaker == speaker_b:
+                if speaker is None:
+                    raise ValueError(f"Unable to determine speaker role for turn: {turn!r}")
+
+                speaker_name = str(speaker)
+                if speaker_b and speaker_name == speaker_b:
                     messages.append(AIMessage(content=text))
-                elif speaker_a and speaker == speaker_a:
+                elif speaker_a and speaker_name == speaker_a:
                     messages.append(HumanMessage(content=text))
-                elif speaker in {"assistant", "ai", "bot", "system"}:
+                elif speaker_name.lower() in {"assistant", "ai", "bot", "system", "speaker_b"}:
                     messages.append(AIMessage(content=text))
-                elif speaker in {"user", "human", "speaker_a"}:
+                elif speaker_name.lower() in {"user", "human", "speaker_a"}:
                     messages.append(HumanMessage(content=text))
                 else:
-                    # Fall back to alternating roles when the source only provides names.
-                    if len(messages) % 2 == 0:
-                        messages.append(HumanMessage(content=text))
-                    else:
-                        messages.append(AIMessage(content=text))
+                    raise ValueError(f"Unsupported speaker role '{speaker_name}' in turn: {turn!r}")
 
         return messages
 
-    def build_agent_input(self, sample: BenchmarkSample) -> Dict[str, Any]:
+    def build_agent_input(self, sample: BenchmarkSample | Episode) -> Dict[str, Any]:
         """
         Convert a BenchmarkSample into ResearchHelperAgent input.
 
@@ -108,20 +109,20 @@ class LoCoMoAdapter(BenchmarkAdapter):
             - metadata: additional metadata
             - sample_id: the sample identifier
         """
-        context_messages = self.build_context_messages(sample)
-        
-        # Count the number of user turns in the context (every 2 messages ≈ 1 turn)
-        # More precisely: count HumanMessage instances
+        episode = sample.to_episode() if isinstance(sample, BenchmarkSample) else sample
+        context_messages = self.build_context_messages(episode)
+
         context_turn_count = sum(1 for msg in context_messages if isinstance(msg, HumanMessage))
 
         return {
-            "question": sample.question,
-            "gold_answer": sample.gold_answer,
+            "question": episode.question,
+            "gold_answer": episode.gold_answer,
             "context_messages": context_messages,
-            "mode": sample.mode,
+            "mode": episode.mode,
             "context_turn_count": context_turn_count,
-            "evidence": sample.context.get("evidence", []),
-            "raw_fields": sample.context.get("raw_fields", {}),
-            "metadata": sample.metadata,
-            "sample_id": sample.sample_id,
+            "evidence": episode.context.get("evidence", []),
+            "raw_fields": episode.context.get("raw_fields", {}),
+            "metadata": episode.metadata,
+            "sample_id": episode.episode_id,
+            "episode": episode,
         }

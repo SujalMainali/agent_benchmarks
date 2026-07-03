@@ -99,25 +99,25 @@ def run_single_sample(
     # Load sample
     print(f"Loading samples from {data_file}...")
     loader = LoCoMoLoader()
-    samples = loader.load_from_json(data_file) if data_file.endswith(".json") else loader.load_from_jsonl(data_file)
+    episodes = loader.load_episodes_from_json(data_file) if data_file.endswith(".json") else loader.load_episodes_from_jsonl(data_file)
 
     # Filter by sample_id if provided
     if sample_id:
-        samples = [s for s in samples if s.sample_id == sample_id]
-        if not samples:
+        episodes = [episode for episode in episodes if episode.episode_id == sample_id]
+        if not episodes:
             print(f"Sample {sample_id} not found")
             return
 
-    if not samples:
+    if not episodes:
         print("No samples found")
         return
 
     # Run first sample
-    sample = samples[0]
-    print(f"Running sample: {sample.sample_id}")
+    episode = episodes[0]
+    print(f"Running sample: {episode.episode_id}")
 
     runner = LoCoMoRunner(agent)
-    run_result = runner.run_sample(sample)
+    run_result = runner.run_sample(episode)
     run_result.benchmark_mode = benchmark_settings.prompt_mode
 
     # Evaluate
@@ -134,16 +134,16 @@ def run_single_sample(
 
     # Print summary
     print(f"\n{'='*50}")
-    print(f"Sample: {sample.sample_id}")
-    print(f"Question: {sample.question}")
-    print(f"Gold Answer: {sample.gold_answer}")
+    print(f"Sample: {episode.episode_id}")
+    print(f"Question: {episode.question}")
+    print(f"Gold Answer: {episode.gold_answer}")
     print(f"Predicted Answer: {run_result.predicted_answer}")
     print(f"Score: {eval_result.score:.2f}")
     print(f"Correct: {eval_result.is_correct}")
     print(f"Reason: {eval_result.correctness_reason}")
     print(f"Total Latency: {run_result.total_latency_ms:.2f}ms")
     print(f"Turns: {len(run_result.trajectory)}")
-    print(f"Results saved to: {os.path.join(output_dir, sample.sample_id)}")
+    print(f"Results saved to: {os.path.join(output_dir, episode.episode_id)}")
 
 
 def run_batch(
@@ -172,16 +172,16 @@ def run_batch(
     # Load samples
     print(f"Loading samples from {data_file}...")
     loader = LoCoMoLoader()
-    samples = loader.load_from_json(data_file) if data_file.endswith(".json") else loader.load_from_jsonl(data_file)
+    episodes = loader.load_episodes_from_json(data_file) if data_file.endswith(".json") else loader.load_episodes_from_jsonl(data_file)
 
     if max_samples:
-        samples = samples[:max_samples]
+        episodes = episodes[:max_samples]
 
-    print(f"Running {len(samples)} samples...")
+    print(f"Running {len(episodes)} samples...")
 
     # Run batch
     runner = LoCoMoRunner(agent)
-    run_results = runner.run_batch(samples, verbose=verbose)
+    run_results = runner.run_batch(episodes, verbose=verbose)
     for run_result in run_results:
         run_result.benchmark_mode = benchmark_settings.prompt_mode
 

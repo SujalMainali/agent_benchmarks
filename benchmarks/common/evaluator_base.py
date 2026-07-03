@@ -1,10 +1,10 @@
 """Base evaluator class for benchmark implementations."""
 
 from abc import abstractmethod
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from .interfaces import BenchmarkEvaluator
-from .models import EvaluationResult, RunResult
+from .models import EvaluationContext, EvaluationResult, RunResult, TrajectoryEvent
 
 
 class EvaluatorBase(BenchmarkEvaluator):
@@ -17,17 +17,44 @@ class EvaluatorBase(BenchmarkEvaluator):
         self.name = name
         self.results: List[EvaluationResult] = []
 
-    def evaluate_batch(self, run_results: List[RunResult]) -> List[EvaluationResult]:
-        """Evaluate multiple run results and store internally.
+    def evaluate_batch(self, run_results: List[RunResult | EvaluationContext]) -> List[EvaluationResult]:
+        """Evaluate multiple results or contexts and store internally.
         
         Args:
-            run_results: List of RunResult objects from agent runs.
+            run_results: List of RunResult objects or EvaluationContext objects.
             
         Returns:
             List of EvaluationResult objects.
         """
-        self.results = [self.evaluate(result) for result in run_results]
+        self.results = [self.evaluate(self._coerce_context(result)) for result in run_results]
         return self.results
+
+    def _coerce_context(self, result: RunResult | EvaluationContext) -> EvaluationContext:
+        if isinstance(result, EvaluationContext):
+            return result
+
+        episode = result.episode
+        if episode is None:
+            from .models import BenchmarkSample
+
+            episode = BenchmarkSample(
+                sample_id=result.sample_id,
+                question=result.question,
+                gold_answer=result.gold_answer,
+                context={"metadata": result.metadata},
+                mode=result.benchmark_mode,
+                metadata=result.metadata,
+            ).to_episode()
+
+        return EvaluationContext(
+            episode=episode,
+            trajectory=list(result.trajectory),
+            environment_state=result.final_state,
+            predicted_output=result.predicted_answer,
+            metadata=result.metadata,
+            official_metadata=result.official_eval or {},
+            run_result=result,
+        )
 
     def compute_summary_metrics(self, results: List[EvaluationResult]) -> Dict[str, float]:
         """Compute aggregate metrics across results.
@@ -70,7 +97,7 @@ class EvaluatorBase(BenchmarkEvaluator):
         return grouped
 
     @abstractmethod
-    def evaluate(self, result: RunResult) -> EvaluationResult:
+    def evaluate(self, context: EvaluationContext) -> EvaluationResult:
         """Subclasses must implement the actual evaluation logic."""
 
     @abstractmethod

@@ -143,9 +143,22 @@ def run_official_evaluation(
     try:
         from task_eval.evaluation import eval_question_answering
     except ImportError as e:
+        missing_details = []
+        for module_name in ("bert_score", "rouge", "nltk"):
+            try:
+                __import__(module_name)
+            except Exception:
+                missing_details.append(module_name)
+
+        dependency_hint = (
+            f"Missing official evaluator dependencies: {', '.join(missing_details)}. "
+            if missing_details
+            else ""
+        )
         raise ImportError(
             f"Could not import official LoCoMo evaluator from {locomo_repo}. "
-            f"Make sure third_party/locomo-official is present. Error: {e}"
+            f"Make sure third_party/locomo-official is present and its Python dependencies are installed. "
+            f"{dependency_hint}Error: {e}"
         )
 
     # Export predictions

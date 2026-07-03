@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
-from benchmarks.common.models import BenchmarkSample
+from benchmarks.common.models import BenchmarkSample, Episode, Task
 
 
 class LoCoMoLoader:
@@ -71,6 +71,11 @@ class LoCoMoLoader:
             },
         )
 
+    def load_episode_from_dict(self, raw_sample: Dict[str, Any]) -> Episode:
+        """Load a raw LoCoMo record into the shared Episode model."""
+        sample = self.load_sample_from_dict(raw_sample)
+        return sample.to_episode()
+
     def _normalize_sessions(self, sessions: Any) -> List[Dict[str, Any]]:
         """Normalize official and demo conversation layouts into session dictionaries."""
         if isinstance(sessions, list):
@@ -95,13 +100,17 @@ class LoCoMoLoader:
         Returns:
             List of BenchmarkSample objects.
         """
-        samples = []
-        with open(filepath) as f:
-            for line in f:
-                if line.strip():
-                    raw = json.loads(line)
-                    samples.extend(self._load_raw_sample(raw))
+        samples: List[BenchmarkSample] = []
+        for raw in self._read_json_records(filepath):
+            samples.extend(self._load_raw_sample(raw))
         return samples
+
+    def load_episodes_from_jsonl(self, filepath: str) -> List[Episode]:
+        """Load episodes from a JSONL file."""
+        episodes: List[Episode] = []
+        for raw in self._read_json_records(filepath):
+            episodes.extend(self._load_raw_episodes(raw))
+        return episodes
 
     def load_from_json(self, filepath: str) -> List[BenchmarkSample]:
         """
@@ -125,6 +134,19 @@ class LoCoMoLoader:
             samples.extend(self._load_raw_sample(raw))
         return samples
 
+    def load_episodes_from_json(self, filepath: str) -> List[Episode]:
+        """Load episodes from a JSON file."""
+        with open(filepath) as f:
+            raw_samples = json.load(f)
+
+        if isinstance(raw_samples, dict):
+            raw_samples = raw_samples.get("samples", [])
+
+        episodes: List[Episode] = []
+        for raw in raw_samples:
+            episodes.extend(self._load_raw_episodes(raw))
+        return episodes
+
     def iter_samples(self, filepath: str) -> Generator[BenchmarkSample, None, None]:
         """
         Iterate over samples from a file (memory-efficient for large datasets).
@@ -137,12 +159,9 @@ class LoCoMoLoader:
         """
         filepath = Path(filepath)
         if filepath.suffix == ".jsonl":
-            with open(filepath) as f:
-                for line in f:
-                    if line.strip():
-                        raw = json.loads(line)
-                        for sample in self._load_raw_sample(raw):
-                            yield sample
+            for raw in self._read_json_records(filepath):
+                for sample in self._load_raw_sample(raw):
+                    yield sample
         else:
             # JSON file
             with open(filepath) as f:
@@ -153,36 +172,116 @@ class LoCoMoLoader:
                 for sample in self._load_raw_sample(raw):
                     yield sample
 
+    def iter_episodes(self, filepath: str) -> Generator[Episode, None, None]:
+        """Iterate over episodes from a file."""
+        filepath = Path(filepath)
+        if filepath.suffix == ".jsonl":
+            for raw in self._read_json_records(filepath):
+                for episode in self._load_raw_episodes(raw):
+                    yield episode
+        else:
+            with open(filepath) as f:
+                raw_samples = json.load(f)
+            if isinstance(raw_samples, dict):
+                raw_samples = raw_samples.get("samples", [])
+            for raw in raw_samples:
+                for episode in self._load_raw_episodes(raw):
+                    yield episode
+
+    def _read_json_records(self, filepath: str) -> List[Dict[str, Any]]:
+        """Read JSONL or concatenated JSON objects from a file."""
+        text = Path(filepath).read_text()
+        stripped = text.strip()
+        if not stripped:
+            return []
+
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return self._parse_json_stream(stripped)
+
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            samples = parsed.get("samples")
+            if isinstance(samples, list):
+                return samples
+            return [parsed]
+        return [parsed]
+
+    def _parse_json_stream(self, text: str) -> List[Dict[str, Any]]:
+        """Parse a stream of JSON objects separated by whitespace or newlines."""
+        decoder = json.JSONDecoder()
+        index = 0
+        length = len(text)
+        records: List[Dict[str, Any]] = []
+
+        while index < length:
+            while index < length and text[index].isspace():
+                index += 1
+            if index >= length:
+                break
+
+            record, end = decoder.raw_decode(text, index)
+            records.append(record)
+            index = end
+
+            while index < length and (text[index].isspace() or text[index] == ","):
+                index += 1
+
+        return records
+
     def _load_raw_sample(self, raw_sample: Dict[str, Any]) -> List[BenchmarkSample]:
         """Load one raw record, expanding official QA lists into individual benchmark samples."""
+        return [BenchmarkSample.from_episode(episode) for episode in self._load_raw_episodes(raw_sample)]
+
+    def _load_raw_episodes(self, raw_sample: Dict[str, Any]) -> List[Episode]:
+        """Load one raw record, expanding official QA lists into individual episodes."""
         if isinstance(raw_sample.get("qa"), list) and raw_sample.get("conversation"):
             sample_id = str(raw_sample.get("sample_id", "unknown"))
             conversation = raw_sample.get("conversation", {})
             sessions = self._conversation_to_sessions(conversation)
-            samples: List[BenchmarkSample] = []
+            episodes: List[Episode] = []
             for index, qa_item in enumerate(raw_sample["qa"]):
-                merged = {
-                    "sample_id": f"{sample_id}_{index}",
-                    "question": qa_item.get("question", ""),
-                    "answer": qa_item.get("answer", ""),
-                    "gold_answer": qa_item.get("answer", ""),
-                    "category": qa_item.get("category", 4),
-                    "evidence": qa_item.get("evidence", []),
-                    "conversation": conversation,
-                    "sessions": sessions,
-                    "qa": [qa_item],
-                    "raw_fields": raw_sample,
-                    "official": {
+                task = Task(
+                    task_id=f"{sample_id}_{index}",
+                    question=str(qa_item.get("question", "")),
+                    gold_answer=str(qa_item.get("answer", "")),
+                    context={
                         "conversation": conversation,
-                        "qa_item": qa_item,
-                        "qa_index": index,
-                        "source_sample_id": sample_id,
+                        "sessions": sessions,
+                        "evidence": qa_item.get("evidence", []),
+                        "category": qa_item.get("category", 4),
+                        "raw_fields": raw_sample,
+                        "official": {
+                            "conversation": conversation,
+                            "qa_item": qa_item,
+                            "qa_index": index,
+                            "source_sample_id": sample_id,
+                        },
                     },
-                }
-                samples.append(self.load_sample_from_dict(merged))
-            return samples
+                    mode=str(raw_sample.get("mode", "plain_qa")),
+                    metadata={
+                        "category": qa_item.get("category", 4),
+                        "official": True,
+                    },
+                )
+                episodes.append(
+                    Episode(
+                        episode_id=f"{sample_id}_{index}",
+                        task=task,
+                        metadata={
+                            "category": qa_item.get("category", 4),
+                            "official": True,
+                            "source_sample_id": sample_id,
+                            "qa_index": index,
+                        },
+                        raw_data=raw_sample,
+                    )
+                )
+            return episodes
 
-        return [self.load_sample_from_dict(raw_sample)]
+        return [self.load_episode_from_dict(raw_sample)]
 
     def _conversation_to_sessions(self, conversation: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Convert official conversation dict into a session list."""

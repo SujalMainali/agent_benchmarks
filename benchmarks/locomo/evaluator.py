@@ -7,7 +7,7 @@ import os
 from typing import Any, Dict, List
 
 from benchmarks.common.evaluator_base import EvaluatorBase
-from benchmarks.common.models import EvaluationResult, RunResult
+from benchmarks.common.models import EvaluationContext, EvaluationResult, RunResult
 from benchmarks.common.report_writer import ReportWriter
 
 from .metrics import LoCoMoMetrics
@@ -43,9 +43,9 @@ class LoCoMoEvaluator(EvaluatorBase):
         gold_norm = self._normalize_answer(gold)
         return gold_norm in pred_norm
 
-    def evaluate(self, result: RunResult) -> EvaluationResult:
+    def evaluate(self, context: EvaluationContext | RunResult) -> EvaluationResult:
         """
-        Evaluate a single run result.
+        Evaluate a single run result or evaluation context.
 
         Scoring logic:
         1. Exact match (after normalization) = 1.0
@@ -54,13 +54,17 @@ class LoCoMoEvaluator(EvaluatorBase):
         4. No match = 0.0
 
         Args:
-            result: RunResult from agent execution.
+            context: EvaluationContext or RunResult from agent execution.
 
         Returns:
             EvaluationResult with correctness score.
         """
-        predicted = result.predicted_answer
-        gold = result.gold_answer
+        if isinstance(context, RunResult):
+            context = self._coerce_context(context)
+
+        result = context.run_result
+        predicted = context.predicted_output or (result.predicted_answer if result else "")
+        gold = context.episode.gold_answer
 
         # Compute score
         if self._exact_match(predicted, gold):
@@ -81,19 +85,23 @@ class LoCoMoEvaluator(EvaluatorBase):
             reason = "No match"
 
         # Compute metrics
-        metrics = LoCoMoMetrics.compute_metrics(result)
+        metrics = LoCoMoMetrics.compute_metrics(result) if result else {}
 
         # Build diagnostics
         diagnostics = {
-            "category": result.metadata.get("category", "unknown"),
+            "category": context.episode.metadata.get("category", context.episode.task.metadata.get("category", "unknown")),
+            "episode_id": context.episode.episode_id,
             "metrics": metrics,
             "predicted_length_chars": len(predicted),
             "gold_length_chars": len(gold),
-            "trajectory_length": len(result.trajectory),
+            "trajectory_length": len(context.trajectory),
+            "benchmark_mode": context.episode.mode,
         }
 
+        sample_id = result.sample_id if result else context.episode.episode_id
+
         return EvaluationResult(
-            sample_id=result.sample_id,
+            sample_id=sample_id,
             is_correct=is_correct,
             score=score,
             correctness_reason=reason,

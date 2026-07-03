@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=True)
 
 
 def _get_bool(name: str, default: str = "false") -> bool:
@@ -15,6 +16,11 @@ def _get_bool(name: str, default: str = "false") -> bool:
 
 def _get_int(name: str, default: str) -> int:
     return int(os.getenv(name, default))
+
+
+def _get_str(name: str, default: str = "") -> str:
+    value = os.getenv(name, default)
+    return value.split("#", 1)[0].strip()
 
 
 @dataclass(frozen=True)
@@ -54,15 +60,14 @@ def load_locomo_settings() -> LoCoMoSettings:
     max_samples = _get_int("LOCOMO_MAX_SAMPLES", "0")
 
     return LoCoMoSettings(
-        data_file=os.getenv("LOCOMO_DATA_FILE", "data/locomo/demo.jsonl"),
-        output_dir=os.getenv("LOCOMO_OUTPUT_DIR", "results/locomo"),
-        official_root=os.getenv("LOCOMO_OFFICIAL_ROOT", "third_party/locomo-official"),
+        data_file=_get_str("LOCOMO_DATA_FILE", "data/locomo/locomo10.jsonl"),
+        output_dir=_get_str("LOCOMO_OUTPUT_DIR", "results/locomo"),
+        official_root=_get_str("LOCOMO_OFFICIAL_ROOT", "third_party/locomo-official"),
         use_official_eval=_get_bool("LOCOMO_USE_OFFICIAL_EVAL", "true"),
         allow_tools=_get_bool("LOCOMO_ALLOW_TOOLS", "false"),
-        prompt_mode=os.getenv("LOCOMO_PROMPT_MODE", "qa").strip().lower(),
-        run_mode=os.getenv("LOCOMO_RUN_MODE", "single").strip().lower(),
-        #sample_id=os.getenv("LOCOMO_SAMPLE_ID") or None,
-        sample_id=None,
+        prompt_mode=_get_str("LOCOMO_PROMPT_MODE", "qa").lower(),
+        run_mode=_get_str("LOCOMO_RUN_MODE", "single").lower(),
+        sample_id=_get_str("LOCOMO_SAMPLE_ID", "") or None,
         max_samples=max_samples if max_samples > 0 else None,
         create_demo_data=_get_bool("LOCOMO_CREATE_DEMO_DATA", "true"),
         verbose=_get_bool("LOCOMO_VERBOSE", "true"),

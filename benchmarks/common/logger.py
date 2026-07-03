@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import BaseMessage
 
-from .models import ToolEvent, TrajectoryStep
+from .models import Action, EnvironmentState, Observation, ToolEvent, TrajectoryEvent, TrajectoryStep
 
 
 class BenchmarkLogger:
@@ -17,9 +17,12 @@ class BenchmarkLogger:
 
     def __init__(self, sample_id: str) -> None:
         self.sample_id = sample_id
-        self.trajectory: List[TrajectoryStep] = []
+        self.trajectory: List[TrajectoryEvent] = []
         self.raw_messages: List[Dict[str, Any]] = []
         self.questions: List[Dict[str, Any]] = []
+        self.observations: List[Dict[str, Any]] = []
+        self.actions: List[Dict[str, Any]] = []
+        self.environment_snapshots: List[Dict[str, Any]] = []
         self.start_time = time.time()
         self.turn_number = 0
 
@@ -56,10 +59,52 @@ class BenchmarkLogger:
         """Log the current memory state."""
         self.current_memory_state = state
 
+    def log_observation(self, observation: Observation) -> None:
+        """Log a benchmark observation."""
+        self.observations.append(
+            {
+                "episode_id": observation.episode_id,
+                "text": observation.text,
+                "metadata": observation.metadata,
+                "timestamp": time.time(),
+            }
+        )
+
+    def log_action(self, action: Action) -> None:
+        """Log a benchmark action."""
+        self.actions.append(
+            {
+                "action_type": action.action_type,
+                "text": action.text,
+                "tool_name": action.tool_name,
+                "arguments": action.arguments,
+                "metadata": action.metadata,
+                "timestamp": time.time(),
+            }
+        )
+
+    def log_environment_snapshot(self, snapshot: EnvironmentState) -> None:
+        """Log a serializable environment snapshot."""
+        self.environment_snapshots.append(
+            {
+                "episode_id": snapshot.episode_id,
+                "done": snapshot.done,
+                "latest_observation": snapshot.latest_observation,
+                "latest_action": snapshot.latest_action,
+                "metadata": snapshot.metadata,
+                "timestamp": time.time(),
+            }
+        )
+
+    def log_event(self, event: TrajectoryEvent) -> None:
+        """Log a generic trajectory event."""
+        self.trajectory.append(event)
+
     def finalize_turn(self) -> None:
         """Finalize the current turn and add to trajectory."""
         latency_ms = (time.time() - self.current_turn_start) * 1000
-        step = TrajectoryStep(
+        step = TrajectoryEvent(
+            event_type="turn",
             turn_number=self.turn_number,
             user_input=self.current_user_input,
             system_prompt=self.current_system_prompt,
@@ -102,6 +147,9 @@ class BenchmarkLogger:
             "trajectory": [asdict(step) for step in self.trajectory],
             "raw_messages": self.raw_messages,
             "questions": self.questions,
+            "observations": self.observations,
+            "actions": self.actions,
+            "environment_snapshots": self.environment_snapshots,
             "total_latency_ms": self.get_total_latency_ms(),
         }
 

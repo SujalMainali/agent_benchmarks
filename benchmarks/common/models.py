@@ -5,6 +5,64 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from langchain_core.messages import BaseMessage
+
+
+@dataclass
+class BenchmarkSpec:
+    """Descriptor for a benchmark suite."""
+
+    name: str
+    version: str = "v1"
+    description: str = ""
+    source: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Task:
+    """Single task inside an episode."""
+
+    task_id: str
+    question: str
+    gold_answer: str
+    context: Dict[str, Any] = field(default_factory=dict)
+    mode: str = "plain_qa"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class EnvironmentState:
+    """Mutable environment state for benchmark execution."""
+
+    episode_id: str
+    messages: List[BaseMessage] = field(default_factory=list)
+    done: bool = False
+    latest_observation: Dict[str, Any] = field(default_factory=dict)
+    latest_action: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Observation:
+    """What the runtime sees at a given step."""
+
+    episode_id: str
+    text: str
+    messages: List[BaseMessage] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Action:
+    """What the runtime returns to the environment."""
+
+    action_type: str
+    text: str = ""
+    tool_name: str = ""
+    arguments: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class ToolEvent:
@@ -18,34 +76,104 @@ class ToolEvent:
 
 
 @dataclass
-class TrajectoryStep:
-    """One turn of agent interaction."""
+class TrajectoryEvent:
+    """Single event inside a trajectory."""
 
-    turn_number: int
-    user_input: str
-    system_prompt: str
-    agent_message: str
+    event_type: str = "turn"
+    turn_number: int = 0
+    user_input: str = ""
+    system_prompt: str = ""
+    agent_message: str = ""
+    observation: Optional[Observation] = None
+    action: Optional[Action] = None
     tool_calls: List[ToolEvent] = field(default_factory=list)
     memory_state: Dict[str, Any] = field(default_factory=dict)
+    environment_state_before: Dict[str, Any] = field(default_factory=dict)
+    environment_state_after: Dict[str, Any] = field(default_factory=dict)
     latency_ms: float = 0.0
+    token_count: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Trajectory:
+    """Ordered collection of trajectory events."""
+
+    events: List[TrajectoryEvent] = field(default_factory=list)
+
+    def append(self, event: TrajectoryEvent) -> None:
+        self.events.append(event)
+
+    def extend(self, events: List[TrajectoryEvent]) -> None:
+        self.events.extend(events)
+
+    def __len__(self) -> int:
+        return len(self.events)
+
+
+@dataclass
+class Episode:
+    """A benchmark episode containing one or more tasks."""
+
+    episode_id: str
+    task: Task
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    environment_state: EnvironmentState | None = None
+    raw_data: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def question(self) -> str:
+        return self.task.question
+
+    @property
+    def gold_answer(self) -> str:
+        return self.task.gold_answer
+
+    @property
+    def context(self) -> Dict[str, Any]:
+        return self.task.context
+
+    @property
+    def mode(self) -> str:
+        return self.task.mode
+
+    @property
+    def sample_id(self) -> str:
+        return self.episode_id
+
+
+@dataclass
+class EvaluationContext:
+    """Structured input to evaluators."""
+
+    episode: Episode
+    trajectory: List[TrajectoryEvent] = field(default_factory=list)
+    environment_state: EnvironmentState | None = None
+    predicted_output: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    official_metadata: Dict[str, Any] = field(default_factory=dict)
+    run_result: RunResult | None = None  # type: ignore[name-defined]
 
 
 @dataclass
 class RunResult:
-    """Complete result of running one benchmark sample."""
+    """Complete result of running one benchmark episode or sample."""
 
     sample_id: str
-    question: str
-    predicted_answer: str
-    gold_answer: str
-    trajectory: List[TrajectoryStep] = field(default_factory=list)
+    question: str = ""
+    predicted_answer: str = ""
+    gold_answer: str = ""
+    trajectory: List[TrajectoryEvent] = field(default_factory=list)
     raw_messages: List[Dict[str, Any]] = field(default_factory=list)
     metrics: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     total_latency_ms: float = 0.0
     benchmark_mode: str = "plain_qa"  # e.g., "plain_qa", "retrieval_qa", "strict"
-    context_turn_count: int = 0  # number of turns in the context history
-    official_eval: Optional[Dict[str, Any]] = None  # official benchmark scores
+    context_turn_count: int = 0
+    episode_id: str = ""
+    episode: Optional[Episode] = None
+    final_state: Optional[EnvironmentState] = None
+    official_eval: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
 
@@ -64,11 +192,47 @@ class EvaluationResult:
 
 @dataclass
 class BenchmarkSample:
-    """Normalized sample from any benchmark dataset."""
+    """Compatibility wrapper around the newer Task / Episode model."""
 
     sample_id: str
     question: str
     gold_answer: str
-    context: Dict[str, Any] = field(default_factory=dict)  # benchmark-specific data
-    mode: str = "plain_qa"  # e.g., "plain_qa", "retrieval_qa", "multi_turn"
+    context: Dict[str, Any] = field(default_factory=dict)
+    mode: str = "plain_qa"
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def episode_id(self) -> str:
+        return self.sample_id
+
+    def to_task(self) -> Task:
+        return Task(
+            task_id=self.sample_id,
+            question=self.question,
+            gold_answer=self.gold_answer,
+            context=self.context,
+            mode=self.mode,
+            metadata=self.metadata,
+        )
+
+    def to_episode(self) -> Episode:
+        return Episode(
+            episode_id=self.sample_id,
+            task=self.to_task(),
+            metadata=self.metadata,
+            raw_data=self.context.get("raw_fields", {}),
+        )
+
+    @classmethod
+    def from_episode(cls, episode: Episode) -> "BenchmarkSample":
+        return cls(
+            sample_id=episode.episode_id,
+            question=episode.question,
+            gold_answer=episode.gold_answer,
+            context=episode.context,
+            mode=episode.mode,
+            metadata={**episode.task.metadata, **episode.metadata},
+        )
+
+
+TrajectoryStep = TrajectoryEvent

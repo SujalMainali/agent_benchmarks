@@ -45,12 +45,6 @@ class LoCoMoReporter:
             run_results: List of RunResult objects.
             eval_results: List of EvaluationResult objects.
         """
-        # Write evaluation results
-        self.report_writer.write_evaluation_results(eval_results)
-
-        # Write CSV summary
-        self.report_writer.write_csv_summary(eval_results)
-
         # Compute and write metrics
         metrics = {
             "run_metrics": [
@@ -64,8 +58,9 @@ class LoCoMoReporter:
             "evaluation_summary": self._compute_evaluation_summary(eval_results),
         }
 
-        with open(os.path.join(self.output_dir, "metrics.json"), "w") as f:
-            json.dump(metrics, f, indent=2, default=str)
+        self.report_writer.write_metrics(metrics)
+        self.report_writer.write_evaluation_results(eval_results)
+        self.report_writer.write_csv_summary(eval_results)
 
         # Write markdown report
         summary_metrics = {
@@ -101,13 +96,17 @@ class LoCoMoReporter:
         sample_dir = os.path.join(self.output_dir, run_result.sample_id)
         os.makedirs(sample_dir, exist_ok=True)
 
-        # Write output (with question now included)
+        # Write canonical and legacy outputs for compatibility.
+        self.report_writer.write_episode(run_result, subdir=run_result.sample_id)
+        self.report_writer.write_trajectory(run_result, subdir=run_result.sample_id)
+        self.report_writer.write_evaluation(eval_result, subdir=run_result.sample_id)
         self.report_writer.write_run_results(run_result, subdir=run_result.sample_id)
         self.report_writer.write_trace(run_result, subdir=run_result.sample_id)
 
         # Write analysis (using run_result.question directly, not from raw_messages)
         analysis = {
             "sample_id": run_result.sample_id,
+            "episode_id": run_result.episode_id or run_result.sample_id,
             "question": run_result.question,
             "gold_answer": run_result.gold_answer,
             "predicted_answer": run_result.predicted_answer,
