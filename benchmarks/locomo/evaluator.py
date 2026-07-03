@@ -19,6 +19,8 @@ class LoCoMoEvaluator(EvaluatorBase):
     def __init__(self, name: str = "LoCoMo Evaluator") -> None:
         super().__init__(name)
         self.report_writer: ReportWriter | None = None
+        self.use_official_eval: bool = False
+        self.locomo_data: List[Dict[str, Any]] | None = None
 
     def _normalize_answer(self, text: str) -> str:
         """Normalize an answer for comparison."""
@@ -126,3 +128,26 @@ class LoCoMoEvaluator(EvaluatorBase):
             eval_results=results,
             metrics=summary_metrics,
         )
+
+    def evaluate_batch_official(
+        self, results: List[RunResult], locomo_data: List[Dict[str, Any]] | None = None
+    ) -> List[EvaluationResult]:
+        """
+        Evaluate a batch of results using the official LoCoMo evaluator.
+
+        This calls the official eval_question_answering function which provides
+        category-aware F1 scoring aligned with the benchmark.
+
+        Args:
+            results: List of RunResult objects to evaluate.
+            locomo_data: Optional original LoCoMo dataset for context and categories.
+
+        Returns:
+            List of EvaluationResult objects with official scores.
+
+        Raises:
+            ImportError: If the official evaluator cannot be imported.
+        """
+        from .official_bridge import run_official_evaluation
+
+        return run_official_evaluation(results, locomo_data)

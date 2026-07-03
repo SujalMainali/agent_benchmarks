@@ -43,12 +43,13 @@ Full implementation for the LoCoMo benchmark:
 
 - **loader.py**: Dataset loading
   - LoCoMoLoader: Loads from JSON/JSONL files
+  - Flattens official conversation-plus-QA records into per-question samples
   - Normalizes to BenchmarkSample format
 
 - **adapter.py**: Sample adaptation
   - LoCoMoAdapter: Converts samples to agent input
-  - Reconstructs conversation context from sessions
-  - Supports retrieval-aware modes (future)
+  - Reconstructs conversation context with role-preserving replay
+  - Keeps the final benchmark question separate from the history
 
 - **prompts.py**: LoCoMo-specific prompts
   - System prompt for conversational QA
@@ -56,14 +57,16 @@ Full implementation for the LoCoMo benchmark:
   - Strict format prompt variants
 
 - **runner.py**: Orchestration engine
-  - LoCoMoRunner: Executes samples through agent
+  - LoCoMoRunner: Executes samples through the agent
   - Resets memory per sample
-  - Captures full trajectory
+  - Replays the long context once and asks the final question once
+  - Captures full trajectory and raw messages
   - Handles errors gracefully
 
 - **evaluator.py**: Answer evaluation
   - LoCoMoEvaluator: Scores predictions
-  - Exact match, fuzzy match, partial match logic
+  - Exact match, fuzzy match, partial match logic for local fallback
+  - Optional bridge to the official LoCoMo QA evaluator
   - Generates diagnostics and failure analysis
 
 - **metrics.py**: Metrics computation
@@ -77,8 +80,9 @@ Full implementation for the LoCoMo benchmark:
   - Category-wise breakdown
 
 - **run.py**: Command-line entry point
-  - Run single samples or batches
-  - Control output directory and sample limits
+  - Env-driven benchmark wrapper
+  - Supports benchmark prompt modes and tool disabling
+  - Can route scoring through the official LoCoMo evaluator
 
 - **example.py**: Usage examples
   - Basic loading and inspection
@@ -104,7 +108,10 @@ This will:
 
 ### 2. Preparing Your Data
 
-LoCoMo data should be in JSON or JSONL format with this structure:
+LoCoMo data can be provided in JSON or JSONL format. The loader supports both
+simple demo samples and the official conversation-plus-QA format.
+
+Simple sample shape:
 
 ```json
 {
@@ -124,13 +131,33 @@ LoCoMo data should be in JSON or JSONL format with this structure:
 }
 ```
 
+Official sample shape:
+
+```json
+{
+  "sample_id": "conv-26",
+  "conversation": {
+    "speaker_a": "Caroline",
+    "speaker_b": "Melanie",
+    "session_1": [
+      {"speaker": "Caroline", "text": "Hey Mel!"},
+      {"speaker": "Melanie", "text": "Hey Caroline!"}
+    ]
+  },
+  "qa": [
+    {
+      "question": "What did Caroline research?",
+      "answer": "Adoption agencies",
+      "evidence": ["D2:8"],
+      "category": 1
+    }
+  ]
+}
+```
+
 ### 3. Running Single Sample
 
-```bash
-python -m benchmarks.locomo.run data/locomo/samples.jsonl \
-  --sample-id sample_001 \
-  --output-dir results/sample_001
-```
+Set the environment variables and run `python -m benchmarks.locomo.run`.
 
 This will:
 - Load the specific sample
@@ -140,23 +167,18 @@ This will:
 
 ### 4. Running Batch
 
-```bash
-python -m benchmarks.locomo.run data/locomo/samples.jsonl \
-  --batch \
-  --max-samples 10 \
-  --output-dir results/batch_run
-```
+Set `LOCOMO_RUN_MODE=batch` and run `python -m benchmarks.locomo.run`.
 
 Options:
-- `--batch`: Run all samples (or up to --max-samples)
-- `--max-samples N`: Limit to N samples
-- `--output-dir DIR`: Save results to DIR
+- `LOCOMO_RUN_MODE=batch`: Run all samples or the configured limit
+- `LOCOMO_MAX_SAMPLES=N`: Limit to N samples
+- `LOCOMO_OUTPUT_DIR=DIR`: Save results to DIR
 
 ### 5. Output Reports
 
 Single sample produces:
-- `output.json`: Predicted answer and metrics
-- `trace.json`: Full interaction trace with all tool calls
+- `output.json`: Predicted answer, question, metrics, and benchmark metadata
+- `trace.json`: Full interaction trace with raw replayed messages
 - `analysis.json`: Evaluation analysis and diagnostics
 
 Batch produces:
@@ -165,6 +187,9 @@ Batch produces:
 - `metrics.json`: Detailed metrics (per-sample and batch)
 - `report.md`: Human-readable markdown report
 - `{sample_id}/`: Subdirectory for each sample with same files
+
+When `LOCOMO_USE_OFFICIAL_EVAL=true`, the final scores come from the vendored
+official LoCoMo QA evaluator in `third_party/locomo-official/`.
 
 ### 6. Evaluating Results
 

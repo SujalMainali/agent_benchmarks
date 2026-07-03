@@ -27,6 +27,10 @@ class LoCoMoSettings:
 
     data_file: str
     output_dir: str
+    official_root: str
+    use_official_eval: bool
+    allow_tools: bool
+    prompt_mode: str
     run_mode: str
     sample_id: str | None
     max_samples: int | None
@@ -52,8 +56,13 @@ def load_locomo_settings() -> LoCoMoSettings:
     return LoCoMoSettings(
         data_file=os.getenv("LOCOMO_DATA_FILE", "data/locomo/demo.jsonl"),
         output_dir=os.getenv("LOCOMO_OUTPUT_DIR", "results/locomo"),
+        official_root=os.getenv("LOCOMO_OFFICIAL_ROOT", "third_party/locomo-official"),
+        use_official_eval=_get_bool("LOCOMO_USE_OFFICIAL_EVAL", "true"),
+        allow_tools=_get_bool("LOCOMO_ALLOW_TOOLS", "false"),
+        prompt_mode=os.getenv("LOCOMO_PROMPT_MODE", "qa").strip().lower(),
         run_mode=os.getenv("LOCOMO_RUN_MODE", "single").strip().lower(),
-        sample_id=os.getenv("LOCOMO_SAMPLE_ID") or None,
+        #sample_id=os.getenv("LOCOMO_SAMPLE_ID") or None,
+        sample_id=None,
         max_samples=max_samples if max_samples > 0 else None,
         create_demo_data=_get_bool("LOCOMO_CREATE_DEMO_DATA", "true"),
         verbose=_get_bool("LOCOMO_VERBOSE", "true"),

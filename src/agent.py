@@ -16,6 +16,8 @@ class ResearchHelperAgent:
         tools: Sequence,
         memory: TemporaryMemory | None = None,
         max_tool_steps: int = 3,
+        system_prompt_override: str | None = None,
+        allow_tools: bool = True,
     ) -> None:
         tool_list = list(tools)
         self.chat_model = chat_model
@@ -23,9 +25,13 @@ class ResearchHelperAgent:
         self.tools = {tool.name: tool for tool in tool_list}
         self.memory = memory or TemporaryMemory()
         self.max_tool_steps = max_tool_steps
+        self.system_prompt_override = system_prompt_override
+        self.allow_tools = allow_tools
 
     def build_context_messages(self, user_text: str) -> List[BaseMessage]:
-        messages: List[BaseMessage] = [SystemMessage(content=SYSTEM_PROMPT)]
+        # Use the benchmark override if provided, otherwise use the default system prompt
+        system_prompt = self.system_prompt_override if self.system_prompt_override else SYSTEM_PROMPT
+        messages: List[BaseMessage] = [SystemMessage(content=system_prompt)]
 
         if self.memory.summary.strip():
             messages.append(SystemMessage(content=f"Working summary:\n{self.memory.summary}"))
@@ -86,24 +92,32 @@ class ResearchHelperAgent:
 
         final_answer = ""
 
-        for _ in range(self.max_tool_steps):
-            response = self.tool_model.invoke(working_messages)
-            working_messages.append(response)
-            turn_log.append(response)
-
-            tool_calls = getattr(response, "tool_calls", [])
-            if not tool_calls:
-                final_answer = self._message_content_text(response)
-                break
-
-            tool_messages = [self._execute_tool_call(tool_call) for tool_call in tool_calls]
-            working_messages.extend(tool_messages)
-            turn_log.extend(tool_messages)
-        else:
+        # Benchmark mode: no tool loop
+        if not self.allow_tools:
             response = self.chat_model.invoke(working_messages)
             working_messages.append(response)
             turn_log.append(response)
             final_answer = self._message_content_text(response)
+        else:
+            # Normal mode: tool loop
+            for _ in range(self.max_tool_steps):
+                response = self.tool_model.invoke(working_messages)
+                working_messages.append(response)
+                turn_log.append(response)
+
+                tool_calls = getattr(response, "tool_calls", [])
+                if not tool_calls:
+                    final_answer = self._message_content_text(response)
+                    break
+
+                tool_messages = [self._execute_tool_call(tool_call) for tool_call in tool_calls]
+                working_messages.extend(tool_messages)
+                turn_log.extend(tool_messages)
+            else:
+                response = self.chat_model.invoke(working_messages)
+                working_messages.append(response)
+                turn_log.append(response)
+                final_answer = self._message_content_text(response)
 
         if not final_answer:
             final_answer = "I could not produce a final answer."
@@ -120,6 +134,8 @@ class ResearchHelperAgent:
     def stream_turn_updates(self, user_text: str):
         """
         Yield step-wise updates for debugging the native tool-calling loop.
+        
+        In benchmark mode (allow_tools=False), skips the tool loop entirely.
         """
         self.memory.extract_stable_facts(user_text, self.chat_model)
 
@@ -130,28 +146,37 @@ class ResearchHelperAgent:
 
         final_answer = ""
 
-        for _ in range(self.max_tool_steps):
-            response = self.tool_model.invoke(working_messages)
-            working_messages.append(response)
-            turn_log.append(response)
-
-            tool_calls = getattr(response, "tool_calls", [])
-            yield {"step": "model", "messages": [response], "tool_calls": tool_calls}
-
-            if not tool_calls:
-                final_answer = self._message_content_text(response)
-                break
-
-            tool_messages = [self._execute_tool_call(tool_call) for tool_call in tool_calls]
-            working_messages.extend(tool_messages)
-            turn_log.extend(tool_messages)
-            yield {"step": "tools", "messages": tool_messages}
-        else:
+        # Benchmark mode: no tool loop
+        if not self.allow_tools:
             response = self.chat_model.invoke(working_messages)
             working_messages.append(response)
             turn_log.append(response)
             final_answer = self._message_content_text(response)
             yield {"step": "final", "messages": [response]}
+        else:
+            # Normal mode: tool loop
+            for _ in range(self.max_tool_steps):
+                response = self.tool_model.invoke(working_messages)
+                working_messages.append(response)
+                turn_log.append(response)
+
+                tool_calls = getattr(response, "tool_calls", [])
+                yield {"step": "model", "messages": [response], "tool_calls": tool_calls}
+
+                if not tool_calls:
+                    final_answer = self._message_content_text(response)
+                    break
+
+                tool_messages = [self._execute_tool_call(tool_call) for tool_call in tool_calls]
+                working_messages.extend(tool_messages)
+                turn_log.extend(tool_messages)
+                yield {"step": "tools", "messages": tool_messages}
+            else:
+                response = self.chat_model.invoke(working_messages)
+                working_messages.append(response)
+                turn_log.append(response)
+                final_answer = self._message_content_text(response)
+                yield {"step": "final", "messages": [response]}
 
         if not final_answer:
             final_answer = "I could not produce a final answer."

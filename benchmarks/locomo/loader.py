@@ -42,29 +42,48 @@ class LoCoMoLoader:
         Returns:
             BenchmarkSample with normalized structure.
         """
-        sample_id = raw_sample.get("sample_id", "unknown")
-        question = raw_sample.get("question", "")
-        gold_answer = raw_sample.get("gold_answer", "")
-        category = raw_sample.get("category", "general")
-        sessions = raw_sample.get("sessions", [])
+        sample_id = str(raw_sample.get("sample_id", "unknown"))
+        question = raw_sample.get("question") or ""
+        gold_answer = raw_sample.get("gold_answer", raw_sample.get("answer", ""))
+        category = raw_sample.get("category", raw_sample.get("qa_category", "general"))
+
+        sessions = raw_sample.get("sessions") or raw_sample.get("conversation") or []
         evidence = raw_sample.get("evidence", [])
 
-        # Build context from sessions
         context = {
-            "sessions": sessions,
+            "sessions": self._normalize_sessions(sessions),
+            "conversation": raw_sample.get("conversation", {}),
             "evidence": evidence,
             "category": category,
-            "raw_fields": raw_sample,
+            "raw_fields": raw_sample.get("raw_fields", raw_sample),
+            "official": raw_sample.get("official", {}),
         }
 
         return BenchmarkSample(
             sample_id=sample_id,
             question=question,
-            gold_answer=gold_answer,
+            gold_answer=str(gold_answer),
             context=context,
-            mode="plain_qa",
-            metadata={"category": category},
+            mode=raw_sample.get("mode", "plain_qa"),
+            metadata={
+                "category": category,
+                "official": bool(raw_sample.get("qa")),
+            },
         )
+
+    def _normalize_sessions(self, sessions: Any) -> List[Dict[str, Any]]:
+        """Normalize official and demo conversation layouts into session dictionaries."""
+        if isinstance(sessions, list):
+            if sessions and all(isinstance(item, dict) and "speaker" in item for item in sessions):
+                return [{"turns": sessions}]
+            return sessions
+
+        if isinstance(sessions, dict):
+            turn_keys = [key for key in sessions.keys() if key.startswith("session_") and isinstance(sessions.get(key), list)]
+            if turn_keys:
+                return [{"turns": sessions[key]} for key in sorted(turn_keys)]
+
+        return []
 
     def load_from_jsonl(self, filepath: str) -> List[BenchmarkSample]:
         """
@@ -81,8 +100,7 @@ class LoCoMoLoader:
             for line in f:
                 if line.strip():
                     raw = json.loads(line)
-                    sample = self.load_sample_from_dict(raw)
-                    samples.append(sample)
+                    samples.extend(self._load_raw_sample(raw))
         return samples
 
     def load_from_json(self, filepath: str) -> List[BenchmarkSample]:
@@ -102,7 +120,9 @@ class LoCoMoLoader:
         if isinstance(raw_samples, dict):
             raw_samples = raw_samples.get("samples", [])
 
-        samples = [self.load_sample_from_dict(raw) for raw in raw_samples]
+        samples: List[BenchmarkSample] = []
+        for raw in raw_samples:
+            samples.extend(self._load_raw_sample(raw))
         return samples
 
     def iter_samples(self, filepath: str) -> Generator[BenchmarkSample, None, None]:
@@ -121,7 +141,8 @@ class LoCoMoLoader:
                 for line in f:
                     if line.strip():
                         raw = json.loads(line)
-                        yield self.load_sample_from_dict(raw)
+                        for sample in self._load_raw_sample(raw):
+                            yield sample
         else:
             # JSON file
             with open(filepath) as f:
@@ -129,4 +150,45 @@ class LoCoMoLoader:
             if isinstance(raw_samples, dict):
                 raw_samples = raw_samples.get("samples", [])
             for raw in raw_samples:
-                yield self.load_sample_from_dict(raw)
+                for sample in self._load_raw_sample(raw):
+                    yield sample
+
+    def _load_raw_sample(self, raw_sample: Dict[str, Any]) -> List[BenchmarkSample]:
+        """Load one raw record, expanding official QA lists into individual benchmark samples."""
+        if isinstance(raw_sample.get("qa"), list) and raw_sample.get("conversation"):
+            sample_id = str(raw_sample.get("sample_id", "unknown"))
+            conversation = raw_sample.get("conversation", {})
+            sessions = self._conversation_to_sessions(conversation)
+            samples: List[BenchmarkSample] = []
+            for index, qa_item in enumerate(raw_sample["qa"]):
+                merged = {
+                    "sample_id": f"{sample_id}_{index}",
+                    "question": qa_item.get("question", ""),
+                    "answer": qa_item.get("answer", ""),
+                    "gold_answer": qa_item.get("answer", ""),
+                    "category": qa_item.get("category", 4),
+                    "evidence": qa_item.get("evidence", []),
+                    "conversation": conversation,
+                    "sessions": sessions,
+                    "qa": [qa_item],
+                    "raw_fields": raw_sample,
+                    "official": {
+                        "conversation": conversation,
+                        "qa_item": qa_item,
+                        "qa_index": index,
+                        "source_sample_id": sample_id,
+                    },
+                }
+                samples.append(self.load_sample_from_dict(merged))
+            return samples
+
+        return [self.load_sample_from_dict(raw_sample)]
+
+    def _conversation_to_sessions(self, conversation: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Convert official conversation dict into a session list."""
+        sessions: List[Dict[str, Any]] = []
+        for key in sorted(conversation.keys()):
+            if not key.startswith("session_") or not isinstance(conversation[key], list):
+                continue
+            sessions.append({"turns": conversation[key], "session_key": key})
+        return sessions

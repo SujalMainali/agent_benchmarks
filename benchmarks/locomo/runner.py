@@ -33,9 +33,10 @@ class LoCoMoRunner:
 
         The flow:
         1. Reset the agent's memory
-        2. Feed context messages from the sample's sessions
-        3. Ask the question
-        4. Collect the trajectory
+        2. Load context messages from the sample's conversation history
+        3. Replay all context messages with role-preserving add_message
+        4. Ask the final LoCoMo question
+        5. Collect the trajectory
 
         Args:
             sample: BenchmarkSample to run.
@@ -56,20 +57,22 @@ class LoCoMoRunner:
         adapter = LoCoMoAdapter()
         agent_input = adapter.build_agent_input(sample)
 
-        # Get context messages and feed them as history
+        # Get context messages (with role-preserved HumanMessage and AIMessage)
         context_messages = agent_input.get("context_messages", [])
-        if context_messages:
-            self._feed_context(log, context_messages)
-
-        # Add context to memory as recent messages
+        context_turn_count = agent_input.get("context_turn_count", 0)
+        
+        # Replay context messages into memory with correct roles
         for msg in context_messages:
-            if isinstance(msg, HumanMessage):
-                # Add context messages to the agent's recent messages
-                self.agent.memory.recent_messages.append(msg)
+            self.agent.memory.add_message(msg)
+            # Also log them to the trace
+            log.log_context_message(msg)
 
-        # Run the turn with the question
+        # Run the turn with the final question
         question = agent_input["question"]
         gold_answer = agent_input["gold_answer"]
+        benchmark_mode = agent_input["mode"]
+
+        log.log_question(question, metadata={"sample_id": sample.sample_id, "benchmark_mode": benchmark_mode})
 
         # Log the turn start
         system_prompts = [
@@ -91,13 +94,17 @@ class LoCoMoRunner:
             log.log_memory_state(self._capture_memory_state())
             log.finalize_turn()
 
-            # Build the run result
+            # Build the run result with all required fields
             run_result = RunResult(
                 sample_id=sample.sample_id,
+                question=question,  # Now stored directly
                 predicted_answer=predicted_answer,
                 gold_answer=gold_answer,
                 trajectory=log.trajectory,
                 raw_messages=log.raw_messages,
+                benchmark_mode=benchmark_mode,
+                context_turn_count=context_turn_count,
+                metrics=self._compute_metrics(latency_ms, predicted_answer, context_turn_count),
                 metadata=sample.metadata,
                 total_latency_ms=log.get_total_latency_ms(),
             )
@@ -109,10 +116,13 @@ class LoCoMoRunner:
             error_msg = f"Error during agent execution: {str(e)}"
             return RunResult(
                 sample_id=sample.sample_id,
+                question=question,
                 predicted_answer="",
                 gold_answer=gold_answer,
                 trajectory=log.trajectory,
                 raw_messages=log.raw_messages,
+                benchmark_mode=benchmark_mode,
+                context_turn_count=context_turn_count,
                 metadata=sample.metadata,
                 total_latency_ms=log.get_total_latency_ms(),
                 error=error_msg,
@@ -159,7 +169,6 @@ class LoCoMoRunner:
         """
         Capture the current state of the agent's memory.
 
-        Args:
         Returns:
             Dictionary representation of memory state.
         """
@@ -169,4 +178,23 @@ class LoCoMoRunner:
             "tool_results_count": len(self.agent.memory.tool_results),
             "recent_messages_count": len(self.agent.memory.recent_messages),
             "turn_count": self.agent.memory.turn_count,
+        }
+
+    def _compute_metrics(self, latency_ms: float, predicted_answer: str, context_turn_count: int) -> Dict[str, Any]:
+        """
+        Compute per-sample metrics.
+
+        Args:
+            latency_ms: Time taken to generate the answer.
+            predicted_answer: The generated answer text.
+            context_turn_count: Number of turns in the context history.
+
+        Returns:
+            Dictionary of metrics for this sample.
+        """
+        return {
+            "latency_ms": latency_ms,
+            "answer_length": len(predicted_answer.split()),
+            "answer_char_count": len(predicted_answer),
+            "context_turn_count": context_turn_count,
         }

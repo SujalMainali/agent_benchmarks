@@ -160,6 +160,7 @@ def example_evaluator_usage():
     # Create a mock run result
     run_result = RunResult(
         sample_id="locomo_001",
+        question="What is the capital of France?",
         predicted_answer="Paris",
         gold_answer="Paris",
         trajectory=[],
@@ -173,6 +174,7 @@ def example_evaluator_usage():
 
     print(f"\nRun Result:")
     print(f"  Sample ID: {run_result.sample_id}")
+    print(f"  Question: {run_result.question}")
     print(f"  Gold Answer: {run_result.gold_answer}")
     print(f"  Predicted Answer: {run_result.predicted_answer}")
 

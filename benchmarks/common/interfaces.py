@@ -22,6 +22,18 @@ class BenchmarkAdapter(ABC):
         """
 
     @abstractmethod
+    def build_context_messages(self, sample: BenchmarkSample) -> list[Any]:
+        """
+        Build role-preserving context messages for benchmark replay.
+
+        Args:
+            sample: Normalized benchmark sample.
+
+        Returns:
+            List of BaseMessage-compatible objects that preserve conversation roles.
+        """
+
+    @abstractmethod
     def build_agent_input(self, sample: BenchmarkSample) -> Dict[str, Any]:
         """
         Convert a BenchmarkSample into agent-specific input format.

@@ -37,6 +37,18 @@ class TemporaryMemory:
         self.recent_messages.append(AIMessage(content=assistant_text))
         self.turn_count += 1
 
+    def add_message(self, msg: BaseMessage) -> None:
+        """
+        Add an arbitrary BaseMessage to the recent messages.
+
+        This is used for benchmark replay where messages have already been
+        constructed with correct roles (HumanMessage, AIMessage, ToolMessage).
+
+        Args:
+            msg: A BaseMessage to append (HumanMessage, AIMessage, ToolMessage, etc).
+        """
+        self.recent_messages.append(msg)
+
     def _json_from_text(self, text: str) -> Dict[str, Any]:
         cleaned = text.strip()
         if cleaned.startswith("```"):

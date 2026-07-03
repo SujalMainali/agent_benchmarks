@@ -3,4 +3,6 @@ AgentEnv
 data/documents/*
 data/notes/*
 data/locomo/*
+results/*
+third_party/*
 __pycache__

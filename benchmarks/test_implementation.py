@@ -79,6 +79,7 @@ def test_data_structures():
 
         run_result = RunResult(
             sample_id="test_001",
+            question="What is 2+2?",
             predicted_answer="4",
             gold_answer="4",
             trajectory=[trajectory_step],
@@ -185,6 +186,7 @@ def test_evaluator():
 
         result = RunResult(
             sample_id="test_001",
+            question="What is the capital of France?",
             predicted_answer="Paris",
             gold_answer="Paris",
             metadata={"category": "factual"},
@@ -221,6 +223,7 @@ def test_metrics():
 
         result = RunResult(
             sample_id="test_001",
+            question="Test question",
             predicted_answer="Test answer",
             gold_answer="Test",
             trajectory=[step],

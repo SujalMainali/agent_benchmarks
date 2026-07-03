@@ -31,11 +31,15 @@ class ReportWriter:
 
         data = {
             "sample_id": run_result.sample_id,
+            "question": run_result.question,
+            "benchmark_mode": run_result.benchmark_mode,
+            "context_turn_count": run_result.context_turn_count,
             "predicted_answer": run_result.predicted_answer,
             "gold_answer": run_result.gold_answer,
             "metrics": run_result.metrics,
             "metadata": run_result.metadata,
             "total_latency_ms": run_result.total_latency_ms,
+            "official_eval": run_result.official_eval,
             "error": run_result.error,
         }
 
@@ -55,6 +59,10 @@ class ReportWriter:
 
         data = {
             "sample_id": run_result.sample_id,
+            "question": run_result.question,
+            "benchmark_mode": run_result.benchmark_mode,
+            "context_turn_count": run_result.context_turn_count,
+            "official_eval": run_result.official_eval,
             "trajectory": [
                 {
                     "turn_number": step.turn_number,

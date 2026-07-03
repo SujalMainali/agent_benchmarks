@@ -21,13 +21,30 @@ from src.tools.note_lookup import note_lookup
 from src.tools.calculator import calculator
 
 from benchmarks.locomo.config import load_locomo_settings
+from benchmarks.locomo.prompts import (
+    LOCOMO_EVIDENCE_AWARE_PROMPT,
+    LOCOMO_QA_PROMPT,
+    LOCOMO_STRICT_FORMAT_PROMPT,
+    LOCOMO_SYSTEM_PROMPT,
+)
 from benchmarks.locomo.loader import LoCoMoLoader
 from benchmarks.locomo.runner import LoCoMoRunner
 from benchmarks.locomo.evaluator import LoCoMoEvaluator
 from benchmarks.locomo.report import LoCoMoReporter
 
 
-def setup_agent(settings) -> ResearchHelperAgent:
+def _select_locomo_prompt(prompt_mode: str) -> str:
+    """Select the benchmark prompt for the requested mode."""
+    if prompt_mode == "strict":
+        return LOCOMO_STRICT_FORMAT_PROMPT
+    if prompt_mode == "rag":
+        return LOCOMO_EVIDENCE_AWARE_PROMPT
+    if prompt_mode == "qa":
+        return LOCOMO_QA_PROMPT
+    return LOCOMO_SYSTEM_PROMPT
+
+
+def setup_agent(settings, benchmark_settings) -> ResearchHelperAgent:
     """Initialize the ResearchHelperAgent with configured tools."""
     llm = HuggingFaceEndpoint(
         repo_id=settings.model_id,
@@ -52,6 +69,8 @@ def setup_agent(settings) -> ResearchHelperAgent:
         chat_model=chat_model,
         tools=tools,
         max_tool_steps=settings.max_tool_steps,
+        system_prompt_override=_select_locomo_prompt(benchmark_settings.prompt_mode),
+        allow_tools=benchmark_settings.allow_tools,
     )
 
 
@@ -74,12 +93,13 @@ def run_single_sample(
     # Load settings and setup agent
     print("Setting up agent...")
     settings = load_settings()
-    agent = setup_agent(settings)
+    benchmark_settings = load_locomo_settings()
+    agent = setup_agent(settings, benchmark_settings)
 
     # Load sample
     print(f"Loading samples from {data_file}...")
     loader = LoCoMoLoader()
-    samples = loader.load_from_jsonl(data_file)
+    samples = loader.load_from_json(data_file) if data_file.endswith(".json") else loader.load_from_jsonl(data_file)
 
     # Filter by sample_id if provided
     if sample_id:
@@ -98,14 +118,18 @@ def run_single_sample(
 
     runner = LoCoMoRunner(agent)
     run_result = runner.run_sample(sample)
+    run_result.benchmark_mode = benchmark_settings.prompt_mode
 
     # Evaluate
     evaluator = LoCoMoEvaluator()
-    eval_result = evaluator.evaluate(run_result)
+    if benchmark_settings.use_official_eval:
+        eval_result = evaluator.evaluate_batch_official([run_result])[0]
+        run_result.official_eval = eval_result.diagnostics
+    else:
+        eval_result = evaluator.evaluate(run_result)
 
     # Report
-    sample_output_dir = os.path.join(output_dir, sample.sample_id)
-    reporter = LoCoMoReporter(sample_output_dir)
+    reporter = LoCoMoReporter(output_dir)
     reporter.write_per_sample_report(run_result, eval_result)
 
     # Print summary
@@ -119,7 +143,7 @@ def run_single_sample(
     print(f"Reason: {eval_result.correctness_reason}")
     print(f"Total Latency: {run_result.total_latency_ms:.2f}ms")
     print(f"Turns: {len(run_result.trajectory)}")
-    print(f"Results saved to: {sample_output_dir}")
+    print(f"Results saved to: {os.path.join(output_dir, sample.sample_id)}")
 
 
 def run_batch(
@@ -142,12 +166,13 @@ def run_batch(
     # Load settings and setup agent
     print("Setting up agent...")
     settings = load_settings()
-    agent = setup_agent(settings)
+    benchmark_settings = load_locomo_settings()
+    agent = setup_agent(settings, benchmark_settings)
 
     # Load samples
     print(f"Loading samples from {data_file}...")
     loader = LoCoMoLoader()
-    samples = loader.load_from_jsonl(data_file)
+    samples = loader.load_from_json(data_file) if data_file.endswith(".json") else loader.load_from_jsonl(data_file)
 
     if max_samples:
         samples = samples[:max_samples]
@@ -157,11 +182,18 @@ def run_batch(
     # Run batch
     runner = LoCoMoRunner(agent)
     run_results = runner.run_batch(samples, verbose=verbose)
+    for run_result in run_results:
+        run_result.benchmark_mode = benchmark_settings.prompt_mode
 
     # Evaluate
     print("Evaluating results...")
     evaluator = LoCoMoEvaluator()
-    eval_results = [evaluator.evaluate(r) for r in run_results]
+    if benchmark_settings.use_official_eval:
+        eval_results = evaluator.evaluate_batch_official(run_results)
+        for run_result, eval_result in zip(run_results, eval_results):
+            run_result.official_eval = eval_result.diagnostics
+    else:
+        eval_results = [evaluator.evaluate(r) for r in run_results]
 
     # Report
     print(f"Writing reports to {output_dir}...")
@@ -195,6 +227,10 @@ def main() -> None:
     print(f"  run_mode: {settings.run_mode}")
     print(f"  data_file: {settings.data_file}")
     print(f"  output_dir: {settings.output_dir}")
+    print(f"  official_root: {settings.official_root}")
+    print(f"  use_official_eval: {settings.use_official_eval}")
+    print(f"  allow_tools: {settings.allow_tools}")
+    print(f"  prompt_mode: {settings.prompt_mode}")
     print(f"  sample_id: {settings.sample_id or 'None'}")
     print(f"  max_samples: {settings.max_samples if settings.max_samples is not None else 'None'}")
 

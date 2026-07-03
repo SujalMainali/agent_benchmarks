@@ -35,6 +35,7 @@ class RunResult:
     """Complete result of running one benchmark sample."""
 
     sample_id: str
+    question: str
     predicted_answer: str
     gold_answer: str
     trajectory: List[TrajectoryStep] = field(default_factory=list)
@@ -42,6 +43,9 @@ class RunResult:
     metrics: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     total_latency_ms: float = 0.0
+    benchmark_mode: str = "plain_qa"  # e.g., "plain_qa", "retrieval_qa", "strict"
+    context_turn_count: int = 0  # number of turns in the context history
+    official_eval: Optional[Dict[str, Any]] = None  # official benchmark scores
     error: Optional[str] = None
 
 

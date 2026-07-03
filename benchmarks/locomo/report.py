@@ -90,7 +90,7 @@ class LoCoMoReporter:
         Write detailed report for a single sample.
 
         Creates a subdirectory for each sample with:
-        - output.json: The predicted answer
+        - output.json: The predicted answer with question
         - trace.json: Full interaction trace
         - analysis.json: Evaluation analysis
 
@@ -101,16 +101,19 @@ class LoCoMoReporter:
         sample_dir = os.path.join(self.output_dir, run_result.sample_id)
         os.makedirs(sample_dir, exist_ok=True)
 
-        # Write output and trace
+        # Write output (with question now included)
         self.report_writer.write_run_results(run_result, subdir=run_result.sample_id)
         self.report_writer.write_trace(run_result, subdir=run_result.sample_id)
 
-        # Write analysis
+        # Write analysis (using run_result.question directly, not from raw_messages)
         analysis = {
             "sample_id": run_result.sample_id,
-            "question": run_result.raw_messages[0].get("content", "") if run_result.raw_messages else "N/A",
+            "question": run_result.question,
             "gold_answer": run_result.gold_answer,
             "predicted_answer": run_result.predicted_answer,
+            "benchmark_mode": run_result.benchmark_mode,
+            "context_turn_count": run_result.context_turn_count,
+            "official_eval": run_result.official_eval,
             "is_correct": eval_result.is_correct,
             "score": eval_result.score,
             "correctness_reason": eval_result.correctness_reason,

@@ -19,6 +19,7 @@ class BenchmarkLogger:
         self.sample_id = sample_id
         self.trajectory: List[TrajectoryStep] = []
         self.raw_messages: List[Dict[str, Any]] = []
+        self.questions: List[Dict[str, Any]] = []
         self.start_time = time.time()
         self.turn_number = 0
 
@@ -80,6 +81,16 @@ class BenchmarkLogger:
             }
         )
 
+    def log_context_message(self, message: BaseMessage, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Log a context message with the original role preserved."""
+        role = getattr(message, "type", None) or message.__class__.__name__.replace("Message", "").lower()
+        self.log_message(role, str(message.content), metadata=metadata)
+
+    def log_question(self, question: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Record the benchmark question separately from the conversation trace."""
+        self.questions.append({"question": question, "metadata": metadata or {}, "timestamp": time.time()})
+        self.log_message("question", question, metadata=metadata)
+
     def get_total_latency_ms(self) -> float:
         """Get total elapsed time in milliseconds."""
         return (time.time() - self.start_time) * 1000
@@ -90,6 +101,7 @@ class BenchmarkLogger:
             "sample_id": self.sample_id,
             "trajectory": [asdict(step) for step in self.trajectory],
             "raw_messages": self.raw_messages,
+            "questions": self.questions,
             "total_latency_ms": self.get_total_latency_ms(),
         }
 
