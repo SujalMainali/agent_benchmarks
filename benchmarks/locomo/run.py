@@ -101,9 +101,19 @@ def run_single_sample(
     loader = LoCoMoLoader()
     episodes = loader.load_episodes_from_json(data_file) if data_file.endswith(".json") else loader.load_episodes_from_jsonl(data_file)
 
-    # Filter by sample_id if provided
+    # Filter by sample_id if provided.
+    # A single raw sample (e.g. "conv-30") is expanded by the loader into one
+    # episode per QA item, each with episode_id "<sample_id>_<index>" and the
+    # original sample id preserved in metadata["source_sample_id"]. Match on the
+    # source sample id so LOCOMO_SAMPLE_ID targets the whole sample; also allow
+    # an exact episode_id match to target a single QA item.
     if sample_id:
-        episodes = [episode for episode in episodes if episode.episode_id == sample_id]
+        episodes = [
+            episode
+            for episode in episodes
+            if episode.metadata.get("source_sample_id") == sample_id
+            or episode.episode_id == sample_id
+        ]
         if not episodes:
             print(f"Sample {sample_id} not found")
             return
@@ -112,38 +122,54 @@ def run_single_sample(
         print("No samples found")
         return
 
-    # Run first sample
-    episode = episodes[0]
-    print(f"Running sample: {episode.episode_id}")
+    # When targeting a sample, run all of its QA items; otherwise run the first.
+    if not sample_id:
+        episodes = episodes[:1]
+
+    print(f"Running {len(episodes)} QA item(s) for sample: {sample_id or episodes[0].episode_id}")
 
     runner = LoCoMoRunner(agent)
-    run_result = runner.run_sample(episode)
-    run_result.benchmark_mode = benchmark_settings.prompt_mode
+    run_results = runner.run_batch(episodes, verbose=True)
+    for run_result in run_results:
+        run_result.benchmark_mode = benchmark_settings.prompt_mode
 
     # Evaluate
     evaluator = LoCoMoEvaluator()
     if benchmark_settings.use_official_eval:
-        eval_result = evaluator.evaluate_batch_official([run_result])[0]
-        run_result.official_eval = eval_result.diagnostics
+        eval_results = evaluator.evaluate_batch_official(run_results)
+        for run_result, eval_result in zip(run_results, eval_results):
+            run_result.official_eval = eval_result.diagnostics
     else:
-        eval_result = evaluator.evaluate(run_result)
+        eval_results = [evaluator.evaluate(r) for r in run_results]
 
     # Report
     reporter = LoCoMoReporter(output_dir)
-    reporter.write_per_sample_report(run_result, eval_result)
+    for run_result, eval_result in zip(run_results, eval_results):
+        reporter.write_per_sample_report(run_result, eval_result)
 
-    # Print summary
+    # Print per-QA-item results
+    for episode, run_result, eval_result in zip(episodes, run_results, eval_results):
+        print(f"\n{'='*50}")
+        print(f"Sample: {episode.episode_id}")
+        print(f"Question: {episode.question}")
+        print(f"Gold Answer: {episode.gold_answer}")
+        print(f"Predicted Answer: {run_result.predicted_answer}")
+        print(f"Score: {eval_result.score:.2f}")
+        print(f"Correct: {eval_result.is_correct}")
+        print(f"Reason: {eval_result.correctness_reason}")
+        print(f"Total Latency: {run_result.total_latency_ms:.2f}ms")
+        print(f"Turns: {len(run_result.trajectory)}")
+        print(f"Results saved to: {os.path.join(output_dir, episode.episode_id)}")
+
+    # Print aggregate summary across the sample's QA items
+    correct = sum(1 for r in eval_results if r.is_correct)
+    total = len(eval_results)
+    accuracy = correct / total if total > 0 else 0
     print(f"\n{'='*50}")
-    print(f"Sample: {episode.episode_id}")
-    print(f"Question: {episode.question}")
-    print(f"Gold Answer: {episode.gold_answer}")
-    print(f"Predicted Answer: {run_result.predicted_answer}")
-    print(f"Score: {eval_result.score:.2f}")
-    print(f"Correct: {eval_result.is_correct}")
-    print(f"Reason: {eval_result.correctness_reason}")
-    print(f"Total Latency: {run_result.total_latency_ms:.2f}ms")
-    print(f"Turns: {len(run_result.trajectory)}")
-    print(f"Results saved to: {os.path.join(output_dir, episode.episode_id)}")
+    print(f"Sample Summary: {sample_id or episodes[0].episode_id}")
+    print(f"Total QA items: {total}")
+    print(f"Correct: {correct}")
+    print(f"Accuracy: {accuracy:.2%}")
 
 
 def run_batch(
