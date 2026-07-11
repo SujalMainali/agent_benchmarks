@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_huggingface import ChatHuggingFace
 
+from .llm import LLMProvider, LLMResponse, ToolCall
 from .memory import TemporaryMemory
 from .prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
 
@@ -12,7 +12,7 @@ from .prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
 class ResearchHelperAgent:
     def __init__(
         self,
-        chat_model: ChatHuggingFace,
+        llm: LLMProvider,
         tools: Sequence,
         memory: TemporaryMemory | None = None,
         max_tool_steps: int = 3,
@@ -20,8 +20,8 @@ class ResearchHelperAgent:
         allow_tools: bool = True,
     ) -> None:
         tool_list = list(tools)
-        self.chat_model = chat_model
-        self.tool_model = chat_model.bind_tools(tool_list)
+        self.llm = llm
+        self.tool_list = tool_list
         self.tools = {tool.name: tool for tool in tool_list}
         self.memory = memory or TemporaryMemory()
         self.max_tool_steps = max_tool_steps
@@ -43,11 +43,17 @@ class ResearchHelperAgent:
         messages.append(HumanMessage(content=user_text))
         return messages
 
-    def _message_content_text(self, message: BaseMessage) -> str:
-        content = message.content
-        if isinstance(content, str):
-            return content.strip()
-        return str(content).strip()
+    def _response_message(self, response: LLMResponse) -> BaseMessage:
+        """Return the underlying provider message, or synthesize one.
+
+        The runtime and memory speak ``langchain_core`` messages, so we thread
+        the provider's own message object (an ``AIMessage`` for the current
+        providers) back into the conversation. This keeps tool-call ids aligned
+        for the next turn regardless of which backend produced the response.
+        """
+        if isinstance(response.message, BaseMessage):
+            return response.message
+        return AIMessage(content=response.text)
 
     def _execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         tool = self.tools.get(tool_name)
@@ -62,10 +68,10 @@ class ResearchHelperAgent:
         except Exception as exc:
             return f"Tool execution error: {exc}"
 
-    def _execute_tool_call(self, tool_call: Dict[str, Any]) -> ToolMessage:
-        tool_name = tool_call.get("name", "")
-        arguments = tool_call.get("args", {})
-        tool_call_id = tool_call.get("id") or f"{tool_name}_{self.memory.turn_count + 1}"
+    def _execute_tool_call(self, tool_call: ToolCall) -> ToolMessage:
+        tool_name = tool_call.name
+        arguments = tool_call.arguments
+        tool_call_id = tool_call.id or f"{tool_name}_{self.memory.turn_count + 1}"
 
         result = self._execute_tool(tool_name, arguments)
         self.memory.add_tool_result(tool_name, arguments, result)
@@ -81,11 +87,11 @@ class ResearchHelperAgent:
             old_summary=self.memory.summary.strip() or "None",
             recent_dialogue=self.memory.format_recent_dialogue(),
         )
-        response = self.chat_model.invoke([HumanMessage(content=prompt)])
-        self.memory.summary = self._message_content_text(response)
+        response = self.llm.invoke([HumanMessage(content=prompt)])
+        self.memory.summary = response.text
 
     def run_turn(self, user_text: str) -> str:
-        self.memory.extract_stable_facts(user_text, self.chat_model)
+        self.memory.extract_stable_facts(user_text, self.llm)
 
         working_messages = self.build_context_messages(user_text)
         turn_log: List[BaseMessage] = [HumanMessage(content=user_text)]
@@ -94,30 +100,32 @@ class ResearchHelperAgent:
 
         # Benchmark mode: no tool loop
         if not self.allow_tools:
-            response = self.chat_model.invoke(working_messages)
-            working_messages.append(response)
-            turn_log.append(response)
-            final_answer = self._message_content_text(response)
+            response = self.llm.invoke(working_messages)
+            message = self._response_message(response)
+            working_messages.append(message)
+            turn_log.append(message)
+            final_answer = response.text
         else:
             # Normal mode: tool loop
             for _ in range(self.max_tool_steps):
-                response = self.tool_model.invoke(working_messages)
-                working_messages.append(response)
-                turn_log.append(response)
+                response = self.llm.invoke(working_messages, tools=self.tool_list)
+                message = self._response_message(response)
+                working_messages.append(message)
+                turn_log.append(message)
 
-                tool_calls = getattr(response, "tool_calls", [])
-                if not tool_calls:
-                    final_answer = self._message_content_text(response)
+                if not response.has_tool_calls():
+                    final_answer = response.text
                     break
 
-                tool_messages = [self._execute_tool_call(tool_call) for tool_call in tool_calls]
+                tool_messages = [self._execute_tool_call(tc) for tc in response.tool_calls]
                 working_messages.extend(tool_messages)
                 turn_log.extend(tool_messages)
             else:
-                response = self.chat_model.invoke(working_messages)
-                working_messages.append(response)
-                turn_log.append(response)
-                final_answer = self._message_content_text(response)
+                response = self.llm.invoke(working_messages)
+                message = self._response_message(response)
+                working_messages.append(message)
+                turn_log.append(message)
+                final_answer = response.text
 
         if not final_answer:
             final_answer = "I could not produce a final answer."
@@ -134,10 +142,14 @@ class ResearchHelperAgent:
     def stream_turn_updates(self, user_text: str):
         """
         Yield step-wise updates for debugging the native tool-calling loop.
-        
+
         In benchmark mode (allow_tools=False), skips the tool loop entirely.
+
+        Update contract (consumed by the runtime): ``messages`` holds
+        ``langchain_core`` messages and ``tool_calls`` holds langchain-style
+        dicts. Both shapes are provider-agnostic.
         """
-        self.memory.extract_stable_facts(user_text, self.chat_model)
+        self.memory.extract_stable_facts(user_text, self.llm)
 
         working_messages = self.build_context_messages(user_text)
         turn_log: List[BaseMessage] = [HumanMessage(content=user_text)]
@@ -148,35 +160,38 @@ class ResearchHelperAgent:
 
         # Benchmark mode: no tool loop
         if not self.allow_tools:
-            response = self.chat_model.invoke(working_messages)
-            working_messages.append(response)
-            turn_log.append(response)
-            final_answer = self._message_content_text(response)
-            yield {"step": "final", "messages": [response]}
+            response = self.llm.invoke(working_messages)
+            message = self._response_message(response)
+            working_messages.append(message)
+            turn_log.append(message)
+            final_answer = response.text
+            yield {"step": "final", "messages": [message]}
         else:
             # Normal mode: tool loop
             for _ in range(self.max_tool_steps):
-                response = self.tool_model.invoke(working_messages)
-                working_messages.append(response)
-                turn_log.append(response)
+                response = self.llm.invoke(working_messages, tools=self.tool_list)
+                message = self._response_message(response)
+                working_messages.append(message)
+                turn_log.append(message)
 
-                tool_calls = getattr(response, "tool_calls", [])
-                yield {"step": "model", "messages": [response], "tool_calls": tool_calls}
+                tool_call_dicts = response.tool_calls_as_dicts()
+                yield {"step": "model", "messages": [message], "tool_calls": tool_call_dicts}
 
-                if not tool_calls:
-                    final_answer = self._message_content_text(response)
+                if not response.has_tool_calls():
+                    final_answer = response.text
                     break
 
-                tool_messages = [self._execute_tool_call(tool_call) for tool_call in tool_calls]
+                tool_messages = [self._execute_tool_call(tc) for tc in response.tool_calls]
                 working_messages.extend(tool_messages)
                 turn_log.extend(tool_messages)
                 yield {"step": "tools", "messages": tool_messages}
             else:
-                response = self.chat_model.invoke(working_messages)
-                working_messages.append(response)
-                turn_log.append(response)
-                final_answer = self._message_content_text(response)
-                yield {"step": "final", "messages": [response]}
+                response = self.llm.invoke(working_messages)
+                message = self._response_message(response)
+                working_messages.append(message)
+                turn_log.append(message)
+                final_answer = response.text
+                yield {"step": "final", "messages": [message]}
 
         if not final_answer:
             final_answer = "I could not produce a final answer."

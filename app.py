@@ -1,33 +1,20 @@
-from langchain_huggingface import (
-    ChatHuggingFace,
-    HuggingFaceEndpoint,
-)
-
-from src.agent import ResearchHelperAgent
 from src.config import load_settings
+from src.llm import build_provider
+from src.agent import ResearchHelperAgent
 from src.memory import TemporaryMemory
 from src.tools import TOOLS
 
 
-def build_chat_model(settings):
+def build_llm(settings):
     """
-    Creates the underlying LLM.
+    Create the LLM provider from config.
 
-    This is the only place in the project that knows
-    which model/provider we are using.
+    Provider selection (Hugging Face vs OpenAI) lives entirely in the factory;
+    this is the only wiring app.py needs and it contains no provider-specific
+    code.
     """
 
-    llm = HuggingFaceEndpoint(
-        repo_id=settings.model_id,
-        task="text-generation",
-        huggingfacehub_api_token=settings.hf_token,
-        provider=settings.provider,
-        max_new_tokens=settings.max_new_tokens,
-        temperature=settings.temperature,
-        do_sample=settings.do_sample,
-    )
-
-    return ChatHuggingFace(llm=llm)
+    return build_provider(settings)
 
 
 def build_memory(settings):
@@ -45,13 +32,13 @@ def build_memory(settings):
     )
 
 
-def build_agent(chat_model, memory, settings):
+def build_agent(llm, memory, settings):
     """
     Creates the complete Research Helper Agent.
     """
 
     return ResearchHelperAgent(
-        chat_model=chat_model,
+        llm=llm,
         tools=TOOLS,
         memory=memory,
         max_tool_steps=settings.max_tool_steps,
@@ -68,18 +55,19 @@ def main():
     # ----------------------------
     # Build application components
     # ----------------------------
-    chat_model = build_chat_model(settings)
+    llm = build_llm(settings)
 
     memory = build_memory(settings)
 
     agent = build_agent(
-        chat_model=chat_model,
+        llm=llm,
         memory=memory,
         settings=settings,
     )
 
     print("=" * 60)
     print("Research Helper Agent")
+    print(f"Provider: {settings.llm_provider} | Model: {settings.model_id}")
     print("=" * 60)
     print("Type 'exit' to quit.\n")
 

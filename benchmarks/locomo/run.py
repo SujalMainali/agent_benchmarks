@@ -11,10 +11,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
-
 from src.agent import ResearchHelperAgent
 from src.config import load_settings
+from src.llm import build_provider
 from src.tools.web_search import web_search
 from src.tools.document_search import document_search
 from src.tools.note_lookup import note_lookup
@@ -45,18 +44,12 @@ def _select_locomo_prompt(prompt_mode: str) -> str:
 
 
 def setup_agent(settings, benchmark_settings) -> ResearchHelperAgent:
-    """Initialize the ResearchHelperAgent with configured tools."""
-    llm = HuggingFaceEndpoint(
-        repo_id=settings.model_id,
-        task="text-generation",
-        huggingfacehub_api_token=settings.hf_token,
-        provider=settings.provider,
-        max_new_tokens=settings.max_new_tokens,
-        temperature=settings.temperature,
-        do_sample=settings.do_sample,
-    )
+    """Initialize the ResearchHelperAgent with configured tools.
 
-    chat_model = ChatHuggingFace(llm=llm)
+    The LLM backend (Hugging Face or OpenAI) is chosen by the provider factory
+    from config; this benchmark wiring never imports a provider SDK directly.
+    """
+    llm = build_provider(settings)
 
     tools = [
         calculator,
@@ -66,7 +59,7 @@ def setup_agent(settings, benchmark_settings) -> ResearchHelperAgent:
     ]
 
     return ResearchHelperAgent(
-        chat_model=chat_model,
+        llm=llm,
         tools=tools,
         max_tool_steps=settings.max_tool_steps,
         system_prompt_override=_select_locomo_prompt(benchmark_settings.prompt_mode),

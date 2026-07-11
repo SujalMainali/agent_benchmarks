@@ -111,21 +111,26 @@ class TemporaryMemory:
                 return
         self.facts.append(fact)
 
-    def extract_stable_facts(self, user_text: str, chat_model=None) -> List[Dict[str, Any]]:
+    def extract_stable_facts(self, user_text: str, llm=None) -> List[Dict[str, Any]]:
         """
         Use the LLM to extract durable local-memory facts from a user message.
+
+        Args:
+            user_text: The user message to mine for stable facts.
+            llm: A provider-agnostic ``LLMProvider`` (``src.llm.LLMProvider``).
+                When ``None``, extraction is skipped.
         """
-        if chat_model is None:
+        if llm is None:
             return []
 
         prompt = FACT_EXTRACTOR_PROMPT.format(user_text=user_text)
 
         try:
-            response = chat_model.invoke([HumanMessage(content=prompt)])
+            response = llm.invoke([HumanMessage(content=prompt)])
         except Exception:
             return []
 
-        content = response.content if isinstance(response.content, str) else str(response.content)
+        content = response.text
         parsed = self._json_from_text(content)
         raw_facts = parsed.get("facts", [])
 
