@@ -99,6 +99,25 @@ class BenchmarkEnvironment(ABC):
         """Indicate whether the environment has finished."""
 
 
+class ToolExecutionEnvironment(ABC):
+    """Optional wrapper for stateful tool benchmarks (e.g. ToolSandbox).
+
+    Separates *executing* a single tool call from the broader environment
+    step loop. Implementations own the mutable world state and return either a
+    string result or, on failure, structured exception info.
+    """
+
+    @abstractmethod
+    def execute(self, tool_name: str, arguments: Dict[str, Any]) -> tuple[str, Dict[str, Any] | None]:
+        """Run one tool call and return (result, exception_info).
+
+        Returns:
+            A ``(result, exception_info)`` tuple. On success ``exception_info``
+            is ``None``. On failure ``result`` may be empty and
+            ``exception_info`` carries the error details.
+        """
+
+
 class AgentRuntime(ABC):
     """Abstract runtime wrapper around the concrete agent implementation."""
 

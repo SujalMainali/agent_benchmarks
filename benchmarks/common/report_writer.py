@@ -5,10 +5,28 @@ from __future__ import annotations
 import csv
 import json
 import os
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from .models import EvaluationContext, EvaluationResult, Episode, RunResult, Trajectory, TrajectoryEvent
+from .models import (
+    EnvironmentState,
+    EvaluationContext,
+    EvaluationResult,
+    Episode,
+    RunResult,
+    Trajectory,
+    TrajectoryEvent,
+)
+
+
+def _as_serializable(value: Any) -> Any:
+    """Coerce dataclasses (and lists of them) into JSON-friendly dicts."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    if isinstance(value, list):
+        return [_as_serializable(v) for v in value]
+    return value
 
 
 class ReportWriter:
@@ -59,6 +77,10 @@ class ReportWriter:
                     "user_input": event.user_input,
                     "system_prompt": event.system_prompt,
                     "agent_message": event.agent_message,
+                    "actor": event.actor,
+                    "recipient": event.recipient,
+                    "exception": event.exception,
+                    "milestone_checks": event.milestone_checks,
                     "tool_calls": [
                         {
                             "tool_name": tc.tool_name,
@@ -121,6 +143,96 @@ class ReportWriter:
             "failure_mode": eval_result.failure_mode,
             "diagnostics": eval_result.diagnostics,
         }
+        with open(output_path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+
+    @staticmethod
+    def _resolve_state(source: RunResult | EnvironmentState | None) -> Optional[EnvironmentState]:
+        """Return the EnvironmentState from a RunResult or a state passed directly."""
+        if source is None:
+            return None
+        if isinstance(source, EnvironmentState):
+            return source
+        return source.final_state
+
+    def write_milestones(self, source: RunResult | EnvironmentState, subdir: str = "") -> None:
+        """Write milestone progress for stateful benchmarks (milestone.json)."""
+        state = self._resolve_state(source)
+        milestones = getattr(state, "milestones", []) if state else []
+        serialized = [_as_serializable(m) for m in milestones]
+        data = {
+            "episode_id": getattr(state, "episode_id", "") if state else "",
+            "total": len(serialized),
+            "satisfied": sum(1 for m in serialized if m.get("satisfied")),
+            "milestones": serialized,
+        }
+        output_path = os.path.join(self.output_dir, subdir, "milestone.json")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+
+    def write_minefields(self, source: RunResult | EnvironmentState, subdir: str = "") -> None:
+        """Write minefield (forbidden-state) status for stateful benchmarks (minefields.json)."""
+        state = self._resolve_state(source)
+        minefields = getattr(state, "minefields", []) if state else []
+        serialized = [_as_serializable(m) for m in minefields]
+        data = {
+            "episode_id": getattr(state, "episode_id", "") if state else "",
+            "total": len(serialized),
+            "tripped": sum(1 for m in serialized if m.get("tripped")),
+            "minefields": serialized,
+        }
+        output_path = os.path.join(self.output_dir, subdir, "minefields.json")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+
+    def write_world_state(self, source: RunResult | EnvironmentState, subdir: str = "") -> None:
+        """Write the final world state for stateful benchmarks (world_state.json)."""
+        state = self._resolve_state(source)
+        data = {
+            "episode_id": getattr(state, "episode_id", "") if state else "",
+            "turn_index": getattr(state, "turn_index", 0) if state else 0,
+            "allowed_tools": getattr(state, "allowed_tools", []) if state else [],
+            "world_state": getattr(state, "world_state", {}) if state else {},
+        }
+        output_path = os.path.join(self.output_dir, subdir, "world_state.json")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+
+    def write_state_trace(self, run_result: RunResult, subdir: str = "") -> None:
+        """Write the per-turn world-state evolution for stateful benchmarks (state_trace.json).
+
+        Reconstructs the trace from each trajectory event's before/after
+        environment snapshots so state changes can be inspected turn by turn.
+        """
+        events = (
+            run_result.trajectory.events
+            if isinstance(run_result.trajectory, Trajectory)
+            else run_result.trajectory
+        )
+        steps = [
+            {
+                "turn_number": event.turn_number,
+                "actor": event.actor,
+                "recipient": event.recipient,
+                "state_before": event.environment_state_before,
+                "state_after": event.environment_state_after,
+                "exception": event.exception,
+                "milestone_checks": event.milestone_checks,
+            }
+            for event in events
+        ]
+        final_state = self._resolve_state(run_result)
+        data = {
+            "sample_id": run_result.sample_id,
+            "episode_id": run_result.episode_id or run_result.sample_id,
+            "final_world_state": getattr(final_state, "world_state", {}) if final_state else {},
+            "steps": steps,
+        }
+        output_path = os.path.join(self.output_dir, subdir, "state_trace.json")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w") as f:
             json.dump(data, f, indent=2, default=str)
 

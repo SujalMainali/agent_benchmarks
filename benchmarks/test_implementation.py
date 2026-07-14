@@ -245,6 +245,74 @@ def test_metrics():
         return False
 
 
+def test_toolsandbox_split():
+    """Verify the ToolSandbox process-split architecture stays isolated."""
+    print("\nTesting ToolSandbox process-split...")
+    try:
+        # Importing the main-process ToolSandbox modules must NOT pull in the
+        # vendored ``tool_sandbox`` package (it lives only in the worker).
+        from benchmarks.toolsandbox.environment import ToolSandboxEnvironment
+        from benchmarks.toolsandbox.loader import ToolSandboxLoader
+        from benchmarks.toolsandbox.official_bridge import (
+            ToolSandboxClient,
+            make_inference_fn,
+        )
+        from benchmarks.toolsandbox.runner import ToolSandboxRunner
+
+        assert "tool_sandbox" not in sys.modules, (
+            "tool_sandbox was imported into the main process!"
+        )
+        print("✓ Main-process imports do not import tool_sandbox")
+
+        # The loader must expose the episodes-only signature.
+        from benchmarks.common.models import Action
+        import inspect
+
+        loader_sig = inspect.signature(ToolSandboxLoader.load_named_scenarios)
+        assert list(loader_sig.parameters) == ["self"], loader_sig
+        assert loader_sig.return_annotation != inspect.Signature.empty
+        print("✓ load_named_scenarios() returns episodes only")
+
+        # The client can be built from official_bridge (no worker spawned yet).
+        client = ToolSandboxClient(
+            python_executable="./ToolSandboxEnv/bin/python",
+            official_root="third_party/ToolSandbox-official",
+            inference_fn=make_inference_fn(object()),
+        )
+        assert client.python_executable.endswith("python")
+        print("✓ ToolSandboxClient builds from official_bridge")
+
+        # The runner takes python_executable and builds a client, no scenarios.
+        runner = ToolSandboxRunner(
+            llm=object(),
+            python_executable="./ToolSandboxEnv/bin/python",
+            official_root="third_party/ToolSandbox-official",
+        )
+        assert isinstance(runner.client, ToolSandboxClient)
+        run_sig = inspect.signature(runner.run_batch)
+        assert "scenarios" not in run_sig.parameters, run_sig
+        print("✓ ToolSandboxRunner instantiates with python_executable")
+
+        # The environment no longer runs the official engine in-process.
+        env = ToolSandboxEnvironment()
+        assert not hasattr(env, "execute"), "environment still exposes execute()"
+        try:
+            env.step(Action(action_type="tool_call"))
+        except NotImplementedError:
+            pass
+        else:
+            raise AssertionError("environment.step() should raise NotImplementedError")
+        print("✓ ToolSandboxEnvironment is a snapshot holder (no in-process engine)")
+
+        assert "tool_sandbox" not in sys.modules
+        return True
+    except Exception as e:
+        print(f"✗ ToolSandbox split error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def main():
     print("\n" + "=" * 60)
     print("BENCHMARK IMPLEMENTATION VALIDATION")
@@ -257,6 +325,7 @@ def main():
         test_adapter,
         test_evaluator,
         test_metrics,
+        test_toolsandbox_split,
     ]
 
     results = []

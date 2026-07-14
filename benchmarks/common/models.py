@@ -32,6 +32,71 @@ class Task:
 
 
 @dataclass
+class Milestone:
+    """A checkpoint the agent is expected to reach in a stateful benchmark.
+
+    Modeled after ToolSandbox milestones: a milestone is satisfied when the
+    world reaches an expected state (or a specific tool call / response occurs),
+    possibly after its dependencies have already been satisfied.
+    """
+
+    milestone_id: str
+    description: str = ""
+    kind: str = "state_change"  # state_change | tool_call | response | constraint
+    expected_state: Dict[str, Any] = field(default_factory=dict)
+    dependencies: List[str] = field(default_factory=list)
+    satisfied: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Minefield:
+    """A state the agent must NOT reach (an anti-milestone).
+
+    Tripping a minefield marks the trajectory as having entered a forbidden
+    state, mirroring ToolSandbox's negative-evaluation semantics.
+    """
+
+    minefield_id: str
+    description: str = ""
+    kind: str = "state_change"  # state_change | tool_call | response | constraint
+    forbidden_state: Dict[str, Any] = field(default_factory=dict)
+    dependencies: List[str] = field(default_factory=list)
+    tripped: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class StateSnapshot:
+    """A point-in-time capture of the environment world state."""
+
+    turn_index: int = 0
+    world_state: Dict[str, Any] = field(default_factory=dict)
+    actor: Optional[str] = None
+    label: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ScenarioSpec:
+    """A stateful, conversational benchmark scenario.
+
+    Mirrors the ToolSandbox scenario structure: an initial world state, a seed
+    message list, the set of tools the agent is allowed to call, and the
+    milestones (and minefields) that define success.
+    """
+
+    scenario_id: str
+    name: str = ""
+    base_scenario: Dict[str, Any] = field(default_factory=dict)
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+    tool_allow_list: List[str] = field(default_factory=list)
+    milestones: List[Milestone] = field(default_factory=list)
+    minefields: List[Minefield] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class EnvironmentState:
     """Mutable environment state for benchmark execution."""
 
@@ -40,6 +105,11 @@ class EnvironmentState:
     done: bool = False
     latest_observation: Dict[str, Any] = field(default_factory=dict)
     latest_action: Dict[str, Any] = field(default_factory=dict)
+    world_state: Dict[str, Any] = field(default_factory=dict)
+    allowed_tools: List[str] = field(default_factory=list)
+    milestones: List[Milestone] = field(default_factory=list)
+    minefields: List[Minefield] = field(default_factory=list)
+    turn_index: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -50,6 +120,10 @@ class Observation:
     episode_id: str
     text: str
     messages: List[BaseMessage] = field(default_factory=list)
+    world_state_snapshot: Dict[str, Any] = field(default_factory=dict)
+    available_tools: List[str] = field(default_factory=list)
+    speaker: Optional[str] = None
+    recipient: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -61,6 +135,8 @@ class Action:
     text: str = ""
     tool_name: str = ""
     arguments: Dict[str, Any] = field(default_factory=dict)
+    recipient: Optional[str] = None
+    tool_call_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -84,12 +160,16 @@ class TrajectoryEvent:
     user_input: str = ""
     system_prompt: str = ""
     agent_message: str = ""
+    actor: Optional[str] = None
+    recipient: Optional[str] = None
     observation: Optional[Observation] = None
     action: Optional[Action] = None
     tool_calls: List[ToolEvent] = field(default_factory=list)
     memory_state: Dict[str, Any] = field(default_factory=dict)
     environment_state_before: Dict[str, Any] = field(default_factory=dict)
     environment_state_after: Dict[str, Any] = field(default_factory=dict)
+    exception: Optional[str] = None
+    milestone_checks: List[Dict[str, Any]] = field(default_factory=list)
     latency_ms: float = 0.0
     token_count: Optional[int] = None
     metadata: Dict[str, Any] = field(default_factory=dict)

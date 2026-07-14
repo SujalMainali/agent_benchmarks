@@ -23,6 +23,9 @@ class BenchmarkLogger:
         self.observations: List[Dict[str, Any]] = []
         self.actions: List[Dict[str, Any]] = []
         self.environment_snapshots: List[Dict[str, Any]] = []
+        self.execution_exceptions: List[Dict[str, Any]] = []
+        self.milestone_checks: List[Dict[str, Any]] = []
+        self.tool_allow_list: List[str] = []
         self.start_time = time.time()
         self.turn_number = 0
 
@@ -83,18 +86,71 @@ class BenchmarkLogger:
             }
         )
 
-    def log_environment_snapshot(self, snapshot: EnvironmentState) -> None:
-        """Log a serializable environment snapshot."""
+    def log_environment_snapshot(self, snapshot: EnvironmentState, label: str = "") -> None:
+        """Log a serializable environment snapshot.
+
+        Args:
+            snapshot: The environment state to capture.
+            label: Optional marker (e.g. "before" / "after") for stateful benchmarks.
+        """
         self.environment_snapshots.append(
             {
                 "episode_id": snapshot.episode_id,
+                "label": label,
                 "done": snapshot.done,
+                "turn_index": getattr(snapshot, "turn_index", 0),
                 "latest_observation": snapshot.latest_observation,
                 "latest_action": snapshot.latest_action,
+                "world_state": getattr(snapshot, "world_state", {}),
+                "allowed_tools": getattr(snapshot, "allowed_tools", []),
+                "milestones": [asdict(m) for m in getattr(snapshot, "milestones", [])],
+                "minefields": [asdict(m) for m in getattr(snapshot, "minefields", [])],
                 "metadata": snapshot.metadata,
                 "timestamp": time.time(),
             }
         )
+
+    def log_execution_exception(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        exception: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Log a tool execution failure raised by the environment."""
+        self.execution_exceptions.append(
+            {
+                "turn_number": self.turn_number,
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "exception": exception,
+                "metadata": metadata or {},
+                "timestamp": time.time(),
+            }
+        )
+
+    def log_milestone_check(
+        self,
+        milestone_id: str,
+        satisfied: bool,
+        kind: str = "",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Log the result of evaluating one milestone (or minefield) check."""
+        self.milestone_checks.append(
+            {
+                "turn_number": self.turn_number,
+                "milestone_id": milestone_id,
+                "kind": kind,
+                "satisfied": satisfied,
+                "details": details or {},
+                "timestamp": time.time(),
+            }
+        )
+
+    def log_tool_allow_list(self, tools: List[str]) -> None:
+        """Record the set of tools the agent is permitted to call this episode."""
+        self.tool_allow_list = list(tools)
 
     def log_event(self, event: TrajectoryEvent) -> None:
         """Log a generic trajectory event."""
@@ -150,6 +206,9 @@ class BenchmarkLogger:
             "observations": self.observations,
             "actions": self.actions,
             "environment_snapshots": self.environment_snapshots,
+            "execution_exceptions": self.execution_exceptions,
+            "milestone_checks": self.milestone_checks,
+            "tool_allow_list": self.tool_allow_list,
             "total_latency_ms": self.get_total_latency_ms(),
         }
 
