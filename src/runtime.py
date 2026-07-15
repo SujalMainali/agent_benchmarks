@@ -113,6 +113,12 @@ class ResearchHelperAgentRuntime(AgentRuntime):
             value = getattr(message, key, None)
             if value is not None:
                 metadata[key] = value
+
+        # Preserve adapter-provided metadata (e.g. session/timestamp info) attached
+        # to replayed benchmark messages.
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if additional_kwargs:
+            metadata["additional_kwargs"] = additional_kwargs
         return metadata
 
     def _first_message_text(self, messages: List[BaseMessage]) -> str:

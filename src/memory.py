@@ -227,6 +227,8 @@ class TemporaryMemory:
             metadata["usage_metadata"] = msg.usage_metadata
         if getattr(msg, "response_metadata", None):
             metadata["response_metadata"] = msg.response_metadata
+        if getattr(msg, "additional_kwargs", None):
+            metadata["additional_kwargs"] = msg.additional_kwargs
 
         for key, value in metadata.items():
             lines.append(f"    {key}: {pformat(value, width=100)}")
@@ -242,7 +244,20 @@ class TemporaryMemory:
 
         selected = self.recent_messages[-window_messages:]
         lines = []
+        current_session = None
         for msg in selected:
+            extras = getattr(msg, "additional_kwargs", None) or {}
+            session_index = extras.get("session_index")
+            if session_index is not None and session_index != current_session:
+                current_session = session_index
+                # Session-header system messages already announce the session themselves.
+                if getattr(msg, "type", "") != "system":
+                    header = f"--- SESSION {session_index + 1}"
+                    session_timestamp = extras.get("session_timestamp") or extras.get("timestamp")
+                    if session_timestamp:
+                        header += f" ({session_timestamp})"
+                    lines.append(f"{header} ---")
+
             role = getattr(msg, "type", "message").upper()
             content = self._content_text(msg).strip() or "<empty>"
             lines.append(f"{role}: {content}")

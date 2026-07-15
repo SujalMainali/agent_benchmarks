@@ -50,9 +50,14 @@ class LoCoMoLoader:
         sessions = raw_sample.get("sessions") or raw_sample.get("conversation") or []
         evidence = raw_sample.get("evidence", [])
 
+        conversation = raw_sample.get("conversation", {})
+        normalized_sessions = self._normalize_sessions(sessions)
+
         context = {
-            "sessions": self._normalize_sessions(sessions),
-            "conversation": raw_sample.get("conversation", {}),
+            "sessions": normalized_sessions,
+            "conversation": conversation,
+            "speaker_a": conversation.get("speaker_a") if isinstance(conversation, dict) else None,
+            "speaker_b": conversation.get("speaker_b") if isinstance(conversation, dict) else None,
             "evidence": evidence,
             "category": category,
             "raw_fields": raw_sample.get("raw_fields", raw_sample),
@@ -77,18 +82,91 @@ class LoCoMoLoader:
         return sample.to_episode()
 
     def _normalize_sessions(self, sessions: Any) -> List[Dict[str, Any]]:
-        """Normalize official and demo conversation layouts into session dictionaries."""
+        """Normalize official and demo conversation layouts into session dictionaries.
+
+        Preserves any session-level metadata (timestamps, dates, session keys)
+        instead of reducing sessions to bare turn lists.
+        """
         if isinstance(sessions, list):
             if sessions and all(isinstance(item, dict) and "speaker" in item for item in sessions):
-                return [{"turns": sessions}]
-            return sessions
+                return [self._normalize_session({"turns": sessions}, 0)]
+            return [self._normalize_session(session, index) for index, session in enumerate(sessions)]
 
         if isinstance(sessions, dict):
             turn_keys = [key for key in sessions.keys() if key.startswith("session_") and isinstance(sessions.get(key), list)]
             if turn_keys:
-                return [{"turns": sessions[key]} for key in sorted(turn_keys)]
+                def _session_number(key: str) -> int:
+                    try:
+                        return int(key.split("_")[1])
+                    except (IndexError, ValueError):
+                        return 0
+
+                normalized: List[Dict[str, Any]] = []
+                for index, key in enumerate(sorted(turn_keys, key=_session_number)):
+                    session: Dict[str, Any] = {"turns": sessions[key], "session_key": key}
+                    date_time = sessions.get(f"{key}_date_time")
+                    if date_time:
+                        session["date_time"] = date_time
+                    speaker_a = sessions.get("speaker_a")
+                    speaker_b = sessions.get("speaker_b")
+                    if speaker_a:
+                        session["speaker_a"] = speaker_a
+                    if speaker_b:
+                        session["speaker_b"] = speaker_b
+                    normalized.append(self._normalize_session(session, index))
+                return normalized
 
         return []
+
+    def _normalize_session(self, session: Any, index: int) -> Dict[str, Any]:
+        """Normalize a single session into a dict, preserving its metadata.
+
+        Adds generic fields (session_index, session_id, timestamp, date, time,
+        turn_index) without dropping any keys already present on the session
+        or its turns.
+        """
+        if isinstance(session, dict):
+            normalized: Dict[str, Any] = dict(session)
+            raw_turns = session.get("turns", [])
+        elif isinstance(session, list):
+            normalized = {}
+            raw_turns = session
+        else:
+            normalized = {}
+            raw_turns = []
+
+        normalized["session_index"] = index
+        normalized.setdefault("session_id", normalized.get("session_key", f"session_{index + 1}"))
+
+        date_time = normalized.get("date_time") or normalized.get("timestamp") or normalized.get("datetime")
+        if date_time:
+            normalized["timestamp"] = str(date_time)
+            date_part, time_part = self._split_date_time(str(date_time))
+            normalized.setdefault("date", date_part)
+            normalized.setdefault("time", time_part)
+
+        turns: List[Any] = []
+        for turn_index, turn in enumerate(raw_turns):
+            if isinstance(turn, dict):
+                enriched = dict(turn)
+                enriched.setdefault("turn_index", turn_index)
+                enriched.setdefault("session_index", index)
+                if normalized.get("timestamp"):
+                    enriched.setdefault("session_timestamp", normalized["timestamp"])
+                turns.append(enriched)
+            else:
+                turns.append(turn)
+        normalized["turns"] = turns
+
+        return normalized
+
+    @staticmethod
+    def _split_date_time(date_time: str) -> tuple:
+        """Split LoCoMo-style timestamps like '1:56 pm on 8 May, 2023' into (date, time)."""
+        if " on " in date_time:
+            time_part, _, date_part = date_time.partition(" on ")
+            return date_part.strip(), time_part.strip()
+        return date_time.strip(), ""
 
     def load_from_jsonl(self, filepath: str) -> List[BenchmarkSample]:
         """
@@ -284,10 +362,30 @@ class LoCoMoLoader:
         return [self.load_episode_from_dict(raw_sample)]
 
     def _conversation_to_sessions(self, conversation: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Convert official conversation dict into a session list."""
+        """Convert official conversation dict into a session list, keeping timestamps."""
         sessions: List[Dict[str, Any]] = []
-        for key in sorted(conversation.keys()):
-            if not key.startswith("session_") or not isinstance(conversation[key], list):
-                continue
-            sessions.append({"turns": conversation[key], "session_key": key})
+        speaker_a = conversation.get("speaker_a")
+        speaker_b = conversation.get("speaker_b")
+        session_keys = [
+            key
+            for key in conversation.keys()
+            if key.startswith("session_") and not key.endswith("_date_time") and isinstance(conversation[key], list)
+        ]
+
+        def _session_number(key: str) -> int:
+            try:
+                return int(key.split("_")[1])
+            except (IndexError, ValueError):
+                return 0
+
+        for index, key in enumerate(sorted(session_keys, key=_session_number)):
+            session: Dict[str, Any] = {"turns": conversation[key], "session_key": key}
+            date_time = conversation.get(f"{key}_date_time")
+            if date_time:
+                session["date_time"] = date_time
+            if speaker_a:
+                session["speaker_a"] = speaker_a
+            if speaker_b:
+                session["speaker_b"] = speaker_b
+            sessions.append(self._normalize_session(session, index))
         return sessions

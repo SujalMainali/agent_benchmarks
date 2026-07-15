@@ -27,6 +27,25 @@ class LoCoMoEnvironment(BenchmarkEnvironment):
         self._context_messages = self.adapter.build_context_messages(episode)
         self._last_action = None
         self._last_observation = None
+
+        sessions = episode.context.get("sessions", [])
+        session_metadata = [
+            {
+                key: session.get(key)
+                for key in ("session_index", "session_id", "session_key", "timestamp", "date", "time", "speaker_a", "speaker_b")
+                if isinstance(session, dict) and session.get(key) is not None
+            }
+            for session in sessions
+            if isinstance(session, dict)
+        ]
+        session_headers = [
+            str(msg.content)
+            for msg in self._context_messages
+            if getattr(msg, "type", "") == "system"
+        ]
+        context_turn_count = sum(1 for msg in self._context_messages if getattr(msg, "type", "") == "human")
+        has_timestamps = any(meta.get("timestamp") for meta in session_metadata)
+
         self._state = EnvironmentState(
             episode_id=episode.episode_id,
             messages=list(self._context_messages),
@@ -34,6 +53,7 @@ class LoCoMoEnvironment(BenchmarkEnvironment):
             latest_observation={
                 "question": episode.question,
                 "mode": episode.mode,
+                "session_headers": session_headers,
             },
             latest_action={},
             metadata={
@@ -41,6 +61,10 @@ class LoCoMoEnvironment(BenchmarkEnvironment):
                 "question": episode.question,
                 "gold_answer": episode.gold_answer,
                 "mode": episode.mode,
+                "session_count": len(sessions),
+                "session_metadata": session_metadata,
+                "context_turn_count": context_turn_count,
+                "has_timestamps": has_timestamps,
             },
         )
         return self._state
