@@ -34,6 +34,7 @@ import argparse
 import copy
 import json
 import os
+import random
 import sys
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
@@ -339,6 +340,184 @@ def _build_proxy_agent(system_prompt: str, model_name: str = "research-helper") 
     return ProxyAgent(system_prompt, model_name)
 
 
+# ---------------------------------------------------------------------------
+# Remote-runtime agent: delegates the whole turn to the parent's runtime,
+# and services the parent's tool calls against the official environment.
+# ---------------------------------------------------------------------------
+
+# Synthetic transient error returned to the agent when a fault is injected.
+# The call never touches the sandbox, so it consumes no message budget and
+# mutates no world state — it only exercises the agent's recovery behavior.
+FAULT_MESSAGE = (
+    "TransientToolError: the tool backend timed out. "
+    "The call had no effect. Please retry."
+)
+
+
+def _history_payload(messages: List[Any]) -> List[Dict[str, Any]]:
+    """Official message history -> JSON-safe OpenAI-format dicts for the parent."""
+    from tool_sandbox.common.message_conversion import to_openai_messages
+
+    openai_messages, _ = to_openai_messages(messages)
+    return [
+        {k: _value_to_jsonable(v) for k, v in message.items()}
+        for message in openai_messages
+    ]
+
+
+def _tool_schemas(role: Any) -> List[Dict[str, Any]]:
+    """Allow-list + scrambling-aware OpenAI tool schemas for the agent's tools."""
+    from tool_sandbox.common.tool_conversion import convert_to_openai_tools
+
+    schemas = convert_to_openai_tools(role.get_available_tools())
+    return [{k: _value_to_jsonable(v) for k, v in schema.items()} for schema in schemas]
+
+
+def _build_runtime_agent(fault_rate: float, fault_seed: int) -> Any:
+    """Agent role whose whole turn is driven by the parent's runtime over stdio."""
+    from openai.types.chat.chat_completion_message_tool_call import (
+        ChatCompletionMessageToolCall,
+        Function,
+    )
+    from tool_sandbox.common.execution_context import RoleType, get_current_context
+    from tool_sandbox.common.message_conversion import (
+        Message,
+        openai_tool_call_to_python_code,
+    )
+    from tool_sandbox.roles.base_role import BaseRole
+    from tool_sandbox.roles.execution_environment import ExecutionEnvironment
+
+    class RemoteRuntimeAgent(BaseRole):
+        role_type: Any = RoleType.AGENT
+
+        def __init__(self, rate: float, seed: int) -> None:
+            self._turn_id = 0
+            self._fault_rate = rate
+            self._rng = random.Random(seed)
+            self._fault_log: List[Dict[str, Any]] = []
+            self._environment = ExecutionEnvironment()
+
+        def respond(self, ending_index: Optional[int] = None) -> None:
+            messages = self.get_messages(ending_index=ending_index)
+            self.messages_validation(messages=messages)
+            messages = self.filter_messages(messages=messages)
+            # System is a special role: roles do not respond back to System.
+            if messages[-1].sender == RoleType.SYSTEM:
+                return
+            self._turn_id += 1
+            _send(
+                {
+                    "type": "agent_turn_request",
+                    "id": self._turn_id,
+                    "messages": _history_payload(messages),
+                    "tools": _tool_schemas(self),
+                }
+            )
+            while True:
+                reply = _recv()
+                if reply is None:
+                    raise RuntimeError("Parent closed the stream mid-turn.")
+                rtype = reply.get("type")
+                if rtype == "error":
+                    raise RuntimeError(f"Parent error: {reply.get('message')}")
+                if rtype == "tool_call_request":
+                    _send(self._handle_tool_call(reply))
+                elif rtype == "agent_turn_done":
+                    self.add_messages(
+                        [
+                            Message(
+                                sender=self.role_type,
+                                recipient=RoleType.USER,
+                                content=str(reply.get("text", "")),
+                            )
+                        ]
+                    )
+                    return
+                else:
+                    raise RuntimeError(f"Unexpected message in turn: {rtype}")
+
+        def _handle_tool_call(self, reply: Dict[str, Any]) -> Dict[str, Any]:
+            call_id = reply.get("call_id")
+            name = str(reply.get("name", ""))
+            arguments = reply.get("arguments", {}) or {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+
+            # Fault gate: BEFORE any sandbox interaction. No message appended,
+            # no snapshot, no tool_trace, no max_messages consumption.
+            if self._fault_rate > 0.0 and self._rng.random() < self._fault_rate:
+                self._fault_log.append(
+                    {
+                        "turn": self._turn_id,
+                        "call_id": call_id,
+                        "tool": name,
+                        "arguments": _value_to_jsonable(arguments),
+                    }
+                )
+                return {
+                    "type": "tool_call_response",
+                    "id": self._turn_id,
+                    "call_id": call_id,
+                    "result": "",
+                    "exception": FAULT_MESSAGE,
+                    "fault_injected": True,
+                }
+
+            # Real execution against the official sandbox world state.
+            current_context = get_current_context()
+            available_tool_names = set(self.get_available_tools().keys())
+            openai_tool_call = ChatCompletionMessageToolCall(
+                id=f"tool_call_{self._turn_id}_{call_id}",
+                type="function",
+                function=Function(name=name, arguments=json.dumps(arguments)),
+            )
+            try:
+                execution_facing_tool_name = (
+                    current_context.get_execution_facing_tool_name(name)
+                )
+                code = openai_tool_call_to_python_code(
+                    openai_tool_call,
+                    available_tool_names,
+                    execution_facing_tool_name=execution_facing_tool_name,
+                )
+            except Exception as exc:  # noqa: BLE001 - unknown tool / bad args
+                return {
+                    "type": "tool_call_response",
+                    "id": self._turn_id,
+                    "call_id": call_id,
+                    "result": "",
+                    "exception": f"{type(exc).__name__}: {exc}",
+                    "fault_injected": False,
+                }
+
+            self.add_messages(
+                [
+                    Message(
+                        sender=self.role_type,
+                        recipient=RoleType.EXECUTION_ENVIRONMENT,
+                        content=code,
+                        openai_tool_call_id=openai_tool_call.id,
+                        openai_function_name=name,
+                    )
+                ]
+            )
+            self._environment.respond()
+
+            # Read the environment's reply (last EXECUTION_ENVIRONMENT->AGENT row).
+            last = self.get_messages()[-1]
+            exception = last.tool_call_exception
+            return {
+                "type": "tool_call_response",
+                "id": self._turn_id,
+                "call_id": call_id,
+                "result": str(last.content or ""),
+                "exception": str(exception) if exception else None,
+                "fault_injected": False,
+            }
+
+    return RemoteRuntimeAgent(fault_rate, fault_seed)
+
+
 def _build_scripted_user(utterances: List[str]) -> Any:
     from tool_sandbox.common.execution_context import RoleType
     from tool_sandbox.common.message_conversion import Message
@@ -396,7 +575,14 @@ def _build_official_user(user_impl: str) -> Any:
     return mapping.get(user_impl.lower(), GPT_4_o_2024_05_13_User)()
 
 
-def _build_roles(system_prompt: str, user_mode: str, scripted: List[str]) -> Dict[Any, Any]:
+def _build_roles(
+    system_prompt: str,
+    user_mode: str,
+    scripted: List[str],
+    agent_mode: str = "llm_proxy",
+    fault_rate: float = 0.0,
+    fault_seed: int = 0,
+) -> Dict[Any, Any]:
     from tool_sandbox.common.execution_context import RoleType
     from tool_sandbox.roles.execution_environment import ExecutionEnvironment
 
@@ -405,8 +591,12 @@ def _build_roles(system_prompt: str, user_mode: str, scripted: List[str]) -> Dic
         if user_mode == "scripted"
         else _build_official_user(user_mode)
     )
+    if agent_mode == "runtime":
+        agent_role = _build_runtime_agent(fault_rate, fault_seed)
+    else:
+        agent_role = _build_proxy_agent(system_prompt)
     return {
-        RoleType.AGENT: _build_proxy_agent(system_prompt),
+        RoleType.AGENT: agent_role,
         RoleType.USER: user_role,
         RoleType.EXECUTION_ENVIRONMENT: ExecutionEnvironment(),
     }
@@ -522,8 +712,16 @@ def _cmd_list_scenarios() -> None:
     _send({"type": "scenarios", "scenarios": specs})
 
 
-def _cmd_run_scenario(name: str, max_turns: int, user_mode: str, system_prompt: str) -> None:
-    from tool_sandbox.common.execution_context import set_current_context
+def _cmd_run_scenario(
+    name: str,
+    max_turns: int,
+    user_mode: str,
+    system_prompt: str,
+    agent_mode: str = "llm_proxy",
+    fault_rate: float = 0.0,
+    fault_seed: int = 0,
+) -> None:
+    from tool_sandbox.common.execution_context import RoleType, set_current_context
 
     scenarios = _load_named_scenarios()
     scenario = scenarios.get(name)
@@ -541,8 +739,17 @@ def _cmd_run_scenario(name: str, max_turns: int, user_mode: str, system_prompt: 
     # Reset global context to this scenario's starting state.
     set_current_context(copy.deepcopy(scenario.starting_context))
 
-    roles = _build_roles(system_prompt, user_mode, scripted=[])
+    roles = _build_roles(
+        system_prompt,
+        user_mode,
+        scripted=[],
+        agent_mode=agent_mode,
+        fault_rate=fault_rate,
+        fault_seed=fault_seed,
+    )
     context, evaluation, error = _play_and_evaluate(scenario, roles, name)
+
+    fault_injections = list(getattr(roles[RoleType.AGENT], "_fault_log", []) or [])
 
     conversation = _extract_conversation(context) if context is not None else []
     result = {
@@ -553,6 +760,8 @@ def _cmd_run_scenario(name: str, max_turns: int, user_mode: str, system_prompt: 
         "state_trace": _build_state_trace(context) if context is not None else [],
         "predicted": _last_agent_message_to_user(conversation),
         "evaluation": evaluation,
+        "agent_mode": agent_mode,
+        "fault_injections": fault_injections,
         "error": error,
     }
     _send(result)
@@ -571,6 +780,11 @@ def main() -> None:
     run_parser.add_argument("--max-turns", type=int, default=0)
     run_parser.add_argument("--user-mode", default="scripted")
     run_parser.add_argument("--system-prompt", default="")
+    run_parser.add_argument(
+        "--agent-mode", choices=["llm_proxy", "runtime"], default="llm_proxy"
+    )
+    run_parser.add_argument("--fault-rate", type=float, default=0.0)
+    run_parser.add_argument("--fault-seed", type=int, default=0)
 
     args = parser.parse_args()
 
@@ -583,6 +797,9 @@ def main() -> None:
                 max_turns=args.max_turns,
                 user_mode=args.user_mode,
                 system_prompt=args.system_prompt,
+                agent_mode=args.agent_mode,
+                fault_rate=args.fault_rate,
+                fault_seed=args.fault_seed,
             )
         else:  # pragma: no cover - argparse enforces choices
             _send({"type": "error", "message": f"Unknown command {args.command!r}"})

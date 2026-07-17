@@ -20,12 +20,13 @@ the transport and the model call.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WORKER_MODULE = "benchmarks.toolsandbox.worker"
@@ -57,10 +58,12 @@ class ToolSandboxClient:
         python_executable: str,
         official_root: str = "third_party/ToolSandbox-official",
         inference_fn: Optional[Any] = None,
+        agent_turn_fn: Optional[Callable[..., str]] = None,
     ) -> None:
         self.python_executable = python_executable
         self.official_root = official_root
         self.inference_fn = inference_fn
+        self.agent_turn_fn = agent_turn_fn
 
     # -- public API ---------------------------------------------------------
 
@@ -79,14 +82,26 @@ class ToolSandboxClient:
         system_prompt: str = "",
         max_turns: int = 0,
         user_mode: str = "scripted",
+        agent_mode: str = "llm_proxy",
+        fault_rate: float = 0.0,
+        fault_seed: int = 0,
     ) -> Dict[str, Any]:
         """Play out and score one scenario, servicing inference over stdio.
 
         Returns the worker's terminal ``result`` dict (with ``conversation``,
         ``world_state``, ``state_trace``, ``predicted``, ``evaluation``,
-        ``error``). Requires ``inference_fn`` to have been provided.
+        ``error``, and — in runtime mode — ``fault_injections``).
+
+        In ``llm_proxy`` mode this requires ``inference_fn`` to service the
+        official agent's single completions. In ``runtime`` mode this requires
+        ``agent_turn_fn`` to drive our runtime's whole turn.
         """
-        if self.inference_fn is None:
+        if agent_mode == "runtime":
+            if self.agent_turn_fn is None:
+                raise ToolSandboxWorkerError(
+                    "run_scenario(agent_mode='runtime') requires an agent_turn_fn."
+                )
+        elif self.inference_fn is None:
             raise ToolSandboxWorkerError(
                 "run_scenario requires an inference_fn to service model calls."
             )
@@ -100,6 +115,12 @@ class ToolSandboxClient:
             user_mode,
             "--system-prompt",
             system_prompt,
+            "--agent-mode",
+            agent_mode,
+            "--fault-rate",
+            str(fault_rate),
+            "--fault-seed",
+            str(fault_seed),
         ]
         return self._run_worker(args, inference=True)
 
@@ -141,32 +162,29 @@ class ToolSandboxClient:
     def _run_worker(self, args: List[str], inference: bool) -> Dict[str, Any]:
         """Drive the worker to completion, returning its terminal message.
 
-        When ``inference`` is True, ``inference_request`` lines are serviced via
-        ``inference_fn`` until a ``result``/``error`` line arrives. Otherwise the
-        first well-formed message is returned.
+        When ``inference`` is True, ``inference_request`` and
+        ``agent_turn_request`` lines are serviced until a ``result``/``error``
+        line arrives. Otherwise the first well-formed message is returned.
         """
         process = self._spawn(args)
         assert process.stdout is not None and process.stdin is not None
         try:
             while True:
-                line = process.stdout.readline()
-                if not line:
+                message = self._read_message(process)
+                if message is None:
                     # Stream closed without a terminal message.
                     return self._handle_eof(process)
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    message = json.loads(line)
-                except json.JSONDecodeError:
-                    # Non-protocol noise on the channel; ignore defensively.
-                    continue
 
                 msg_type = message.get("type")
                 if msg_type == "inference_request":
                     if not inference:
                         continue
                     self._service_inference(process, message)
+                    continue
+                if msg_type == "agent_turn_request":
+                    if not inference:
+                        continue
+                    self._service_agent_turn(process, message)
                     continue
                 if msg_type == "error":
                     raise ToolSandboxWorkerError(
@@ -177,9 +195,95 @@ class ToolSandboxClient:
         finally:
             self._cleanup(process)
 
+    def _read_message(self, process: subprocess.Popen) -> Optional[Dict[str, Any]]:
+        """Read the next protocol message, skipping blank/non-JSON lines.
+
+        Returns ``None`` on EOF. Safe to call both from the outer loop and from
+        within a turn (the protocol guarantees no interleaving), so it doubles
+        as the reentrant reader used while servicing ``agent_turn_request``.
+        """
+        assert process.stdout is not None
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                return None
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                # Non-protocol noise on the channel; ignore defensively.
+                continue
+
+    def _write(self, process: subprocess.Popen, payload: Dict[str, Any]) -> None:
+        """Write one JSON line back to the worker's stdin."""
+        assert process.stdin is not None
+        process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        process.stdin.flush()
+
+    def _service_agent_turn(
+        self, process: subprocess.Popen, request: Dict[str, Any]
+    ) -> None:
+        """Drive one whole agent turn via ``agent_turn_fn``.
+
+        ``agent_turn_fn(messages, tools, execute_tool)`` runs our runtime; each
+        of its tool calls is tunneled to the worker as a ``tool_call_request``
+        and answered by the matching ``tool_call_response``. The final answer
+        text is sent back as ``agent_turn_done``.
+        """
+        turn_id = request.get("id")
+        call_counter = itertools.count(1)
+
+        def execute_tool(name: str, arguments: Dict[str, Any]):
+            call_id = next(call_counter)
+            self._write(
+                process,
+                {
+                    "type": "tool_call_request",
+                    "id": turn_id,
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                },
+            )
+            reply = self._read_message(process)
+            if reply is None:
+                raise ToolSandboxWorkerError(
+                    "Worker closed the stream during a tool call."
+                )
+            if reply.get("type") != "tool_call_response":
+                raise ToolSandboxWorkerError(
+                    f"Expected tool_call_response, got {reply!r}"
+                )
+            return (
+                str(reply.get("result", "")),
+                reply.get("exception"),
+                bool(reply.get("fault_injected")),
+            )
+
+        try:
+            text = self.agent_turn_fn(
+                request.get("messages", []),
+                request.get("tools", []),
+                execute_tool,
+            )
+            self._write(
+                process,
+                {"type": "agent_turn_done", "id": turn_id, "text": str(text)},
+            )
+        except Exception as exc:  # noqa: BLE001 - forward failures to the worker
+            self._write(
+                process,
+                {
+                    "type": "error",
+                    "id": turn_id,
+                    "message": f"Main-process agent turn failed: {type(exc).__name__}: {exc}",
+                },
+            )
+
     def _service_inference(self, process: subprocess.Popen, request: Dict[str, Any]) -> None:
         """Run one model completion and write the response back to the worker."""
-        assert process.stdin is not None
         request_id = request.get("id")
         try:
             result = self.inference_fn(
@@ -197,8 +301,7 @@ class ToolSandboxClient:
                 "id": request_id,
                 "message": f"Main-process inference failed: {type(exc).__name__}: {exc}",
             }
-        process.stdin.write(json.dumps(response, ensure_ascii=False) + "\n")
-        process.stdin.flush()
+        self._write(process, response)
 
     def _handle_eof(self, process: subprocess.Popen) -> Dict[str, Any]:
         stderr = self._drain_stderr(process)

@@ -68,6 +68,10 @@ def _setup_runner(settings: ToolSandboxSettings) -> ToolSandboxRunner:
         official_root=settings.official_root,
         user_mode=_resolve_user_mode(settings),
         max_turns=settings.max_turns,
+        agent_mode=settings.agent_mode,
+        max_tool_steps=settings.max_tool_steps,
+        fault_rate=settings.fault_rate,
+        fault_seed=settings.fault_seed,
     )
 
 
@@ -167,6 +171,10 @@ def main() -> None:
     print(f"  max_turns: {settings.max_turns}")
     print(f"  max_scenarios: {settings.max_scenarios if settings.max_scenarios is not None else 'None'}")
     print(f"  user_mode: {_resolve_user_mode(settings)}")
+    print(f"  agent_mode: {settings.agent_mode}")
+    print(f"  max_tool_steps: {settings.max_tool_steps}")
+    print(f"  fault_rate: {settings.fault_rate}")
+    print(f"  fault_seed: {settings.fault_seed}")
 
     official_root = Path(settings.official_root)
     if not official_root.is_absolute():

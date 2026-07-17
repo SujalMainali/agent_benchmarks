@@ -38,6 +38,7 @@ from .official_bridge import (
     ToolSandboxWorkerError,
     make_inference_fn,
 )
+from .runtime_bridge import ToolSandboxRuntimeSession
 
 
 class ToolSandboxRunner:
@@ -51,6 +52,10 @@ class ToolSandboxRunner:
         user_mode: str = "scripted",
         max_turns: int = 0,
         adapter: Optional[ToolSandboxAdapter] = None,
+        agent_mode: str = "runtime",
+        max_tool_steps: int = 8,
+        fault_rate: float = 0.0,
+        fault_seed: int = 13,
     ) -> None:
         self.llm = llm
         self.python_executable = python_executable
@@ -58,6 +63,10 @@ class ToolSandboxRunner:
         self.user_mode = user_mode
         self.max_turns = max_turns
         self.adapter = adapter or ToolSandboxAdapter()
+        self.agent_mode = agent_mode
+        self.max_tool_steps = max_tool_steps
+        self.fault_rate = fault_rate
+        self.fault_seed = fault_seed
         self.client = ToolSandboxClient(
             python_executable=python_executable,
             official_root=official_root,
@@ -71,6 +80,18 @@ class ToolSandboxRunner:
         agent_input = self.adapter.build_agent_input(episode)
         system_prompt = agent_input["system_prompt"]
 
+        # In runtime mode, our agent (ResearchHelperAgentRuntime) drives the
+        # whole turn; the client tunnels each of its tool calls to the worker.
+        session = None
+        if self.agent_mode == "runtime":
+            session = ToolSandboxRuntimeSession(
+                llm=self.llm,
+                system_prompt=system_prompt,
+                max_tool_steps=self.max_tool_steps,
+                episode=episode,
+            )
+            self.client.agent_turn_fn = session.agent_turn_fn
+
         start_time = time.time()
         try:
             result = self.client.run_scenario(
@@ -78,6 +99,9 @@ class ToolSandboxRunner:
                 system_prompt=system_prompt,
                 max_turns=self.max_turns,
                 user_mode=self.user_mode,
+                agent_mode=self.agent_mode,
+                fault_rate=self.fault_rate,
+                fault_seed=self.fault_seed,
             )
         except ToolSandboxWorkerError as exc:
             latency_ms = (time.time() - start_time) * 1000
@@ -86,7 +110,7 @@ class ToolSandboxRunner:
             )
 
         latency_ms = (time.time() - start_time) * 1000
-        return self._build_run_result(episode, result, latency_ms)
+        return self._build_run_result(episode, result, latency_ms, session)
 
     def run_batch(
         self,
@@ -109,6 +133,7 @@ class ToolSandboxRunner:
         episode: Episode,
         result: Dict[str, Any],
         latency_ms: float,
+        session: Optional[ToolSandboxRuntimeSession] = None,
     ) -> RunResult:
         conversation: List[Dict[str, Any]] = result.get("conversation", []) or []
         world_state: Dict[str, Any] = result.get("world_state", {}) or {}
@@ -116,11 +141,30 @@ class ToolSandboxRunner:
         official_eval: Dict[str, Any] = result.get("evaluation", {}) or {}
         predicted = result.get("predicted", "") or ""
         error = result.get("error")
+        fault_injections: List[Dict[str, Any]] = result.get("fault_injections", []) or []
 
         trajectory = self._build_trajectory(conversation, state_trace)
         final_state = self._build_final_state(
             episode, world_state, official_eval, state_trace
         )
+
+        metadata: Dict[str, Any] = {
+            **episode.metadata,
+            "state_change_count": len(state_trace),
+            "world_state": world_state,
+            "state_trace": state_trace,
+            "agent_mode": result.get("agent_mode", self.agent_mode),
+            "fault_injections": fault_injections,
+            "parallel_batching": "sequential",
+        }
+
+        # In runtime mode, attach the parent-side runtime view (agent-internal
+        # steps) alongside the worker-conversation trajectory used by scoring.
+        if session is not None and session.runtime is not None:
+            metadata["runtime_trajectory"] = [
+                event.__dict__ for event in session.runtime.get_trajectory().events
+            ]
+            metadata["runtime_fault_events"] = list(session.proxy.fault_events)
 
         run_result = RunResult(
             sample_id=episode.episode_id,
@@ -134,12 +178,7 @@ class ToolSandboxRunner:
             context_turn_count=sum(
                 1 for m in conversation if str(m.get("sender", "")).endswith("user")
             ),
-            metadata={
-                **episode.metadata,
-                "state_change_count": len(state_trace),
-                "world_state": world_state,
-                "state_trace": state_trace,
-            },
+            metadata=metadata,
             total_latency_ms=latency_ms,
             episode=episode,
             final_state=final_state,

@@ -28,3 +28,8 @@ in [BFCL.md](BFCL.md). Read both before touching `benchmarks/bfcl/`.
   `py_compile`, tests, and `python -m benchmarks.<name>.run`.
 - **Isolated ToolSandbox interpreter:** `./ToolSandboxEnv/bin/python` —
   pinned to polars 0.20 / numpy 1.26, incompatible with AgentEnv.
+
+Now, making use of the codebase memory. Figure out how we can properly make the toolsandbox benchmark run on our agent through its runtime.py and common interface rather than the official agent of toolSanbox.
+
+May be using simulated tools which only appear to change the environment and exert the intended effect and return response to agent rather than running actual tool, some failures from time to time so that agent can be evaluated on recovery from failure.
+

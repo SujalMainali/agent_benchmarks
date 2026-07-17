@@ -23,7 +23,11 @@ def _get_bool(name: str, default: str = "false") -> bool:
 
 
 def _get_int(name: str, default: str) -> int:
-    return int(os.getenv(name, default))
+    return int(_get_str(name, default) or default)
+
+
+def _get_float(name: str, default: str) -> float:
+    return float(_get_str(name, default) or default)
 
 
 def _get_str(name: str, default: str = "") -> str:
@@ -52,6 +56,10 @@ class ToolSandboxSettings:
     max_scenarios: int | None
     output_dir: str
     verbose: bool
+    agent_mode: str
+    max_tool_steps: int
+    fault_rate: float
+    fault_seed: int
 
 
 def load_toolsandbox_settings() -> ToolSandboxSettings:
@@ -71,6 +79,13 @@ def load_toolsandbox_settings() -> ToolSandboxSettings:
     - TOOLSANDBOX_MAX_SCENARIOS: Optional cap for batch runs; `0` means no cap.
     - TOOLSANDBOX_OUTPUT_DIR: Directory where benchmark reports are written.
     - TOOLSANDBOX_VERBOSE: If true, runs print progress to the terminal.
+    - TOOLSANDBOX_AGENT_MODE: `runtime` (evaluate our ResearchHelperAgentRuntime)
+      or `llm_proxy` (legacy: official agent loop driving only our LLM).
+    - TOOLSANDBOX_MAX_TOOL_STEPS: Agent tool-loop budget per user turn in
+      runtime mode.
+    - TOOLSANDBOX_FAULT_RATE: Probability [0,1] that a tool call is answered
+      with a synthetic transient error instead of executing (recovery testing).
+    - TOOLSANDBOX_FAULT_SEED: RNG seed for reproducible fault injection.
     """
 
     max_scenarios = _get_int("TOOLSANDBOX_MAX_SCENARIOS", "0")
@@ -87,4 +102,8 @@ def load_toolsandbox_settings() -> ToolSandboxSettings:
         max_scenarios=max_scenarios if max_scenarios > 0 else None,
         output_dir=_get_str("TOOLSANDBOX_OUTPUT_DIR", "results/toolsandbox"),
         verbose=_get_bool("TOOLSANDBOX_VERBOSE", "true"),
+        agent_mode=_get_str("TOOLSANDBOX_AGENT_MODE", "runtime").lower(),
+        max_tool_steps=_get_int("TOOLSANDBOX_MAX_TOOL_STEPS", "8"),
+        fault_rate=_get_float("TOOLSANDBOX_FAULT_RATE", "0.0"),
+        fault_seed=_get_int("TOOLSANDBOX_FAULT_SEED", "13"),
     )
