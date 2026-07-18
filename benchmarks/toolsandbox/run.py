@@ -89,18 +89,41 @@ def _setup_runner(settings: ToolSandboxSettings) -> ToolSandboxRunner:
     )
 
 
+def _make_reporter(settings: ToolSandboxSettings) -> ToolSandboxReporter:
+    """Standardized immutable run layout (see ResultFormat.md)."""
+    agent_settings = load_settings()
+    return ToolSandboxReporter(
+        results_root=settings.output_dir,
+        run_metadata={
+            "llm_provider": getattr(agent_settings, "llm_provider", None),
+            "model_id": getattr(agent_settings, "model_id", None),
+            "temperature": getattr(agent_settings, "temperature", None),
+            "user_mode": _resolve_user_mode(settings),
+            "agent_mode": settings.agent_mode,
+            "max_turns": settings.max_turns,
+            "max_tool_steps": settings.max_tool_steps,
+            "fault_rate": settings.fault_rate,
+            "fault_seed": settings.fault_seed,
+        },
+    )
+
+
 def _evaluate_and_report(
     run_results,
-    output_dir: str,
+    reporter: ToolSandboxReporter,
 ) -> None:
-    """Score runs and write per-scenario + batch reports."""
+    """Score runs and write the standardized case/summary reports."""
     evaluator = ToolSandboxEvaluator()
     eval_results = evaluator.evaluate_batch(run_results)
 
-    reporter = ToolSandboxReporter(output_dir)
-    reporter.write_full_report(run_results, eval_results)
-    for run_result, eval_result in zip(run_results, eval_results):
-        reporter.write_per_sample_report(run_result, eval_result)
+    for index, (run_result, eval_result) in enumerate(zip(run_results, eval_results)):
+        reporter.writer.append_case(
+            run_result,
+            eval_result,
+            index,
+            **reporter.case_fields(run_result, eval_result),
+        )
+    run_dir = reporter.finalize(run_results, eval_results)
 
     for run_result, eval_result in zip(run_results, eval_results):
         official = run_result.official_eval or {}
@@ -117,7 +140,6 @@ def _evaluate_and_report(
         print(f"Reason: {eval_result.correctness_reason}")
         if run_result.error:
             print(f"Error: {run_result.error}")
-        print(f"Results saved to: {os.path.join(output_dir, run_result.sample_id)}")
 
     correct = sum(1 for r in eval_results if r.is_correct)
     total = len(eval_results)
@@ -127,7 +149,7 @@ def _evaluate_and_report(
     print(f"Correct (fully solved): {correct}")
     print(f"Accuracy: {(correct / total) if total else 0:.2%}")
     print(f"Avg score: {(sum(r.score for r in eval_results) / total) if total else 0:.3f}")
-    print(f"Results saved to: {output_dir}")
+    print(f"Results saved to: {run_dir}")
 
 
 def run_single(settings: ToolSandboxSettings) -> None:
@@ -147,8 +169,11 @@ def run_single(settings: ToolSandboxSettings) -> None:
     print(f"Running scenario: {episodes[0].metadata.get('scenario_name')}")
 
     runner = _setup_runner(settings)
-    run_results = runner.run_batch(episodes, verbose=settings.verbose)
-    _evaluate_and_report(run_results, settings.output_dir)
+    reporter = _make_reporter(settings)
+    run_results = runner.run_batch(
+        episodes, verbose=settings.verbose, on_result=reporter.writer.write_raw
+    )
+    _evaluate_and_report(run_results, reporter)
 
 
 def run_batch(settings: ToolSandboxSettings) -> None:
@@ -166,8 +191,11 @@ def run_batch(settings: ToolSandboxSettings) -> None:
     print(f"Running {len(episodes)} scenario(s)...")
 
     runner = _setup_runner(settings)
-    run_results = runner.run_batch(episodes, verbose=settings.verbose)
-    _evaluate_and_report(run_results, settings.output_dir)
+    reporter = _make_reporter(settings)
+    run_results = runner.run_batch(
+        episodes, verbose=settings.verbose, on_result=reporter.writer.write_raw
+    )
+    _evaluate_and_report(run_results, reporter)
 
 
 def main() -> None:

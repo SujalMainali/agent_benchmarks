@@ -44,7 +44,34 @@ def setup_agent(settings, bench: LongMemEvalSettings) -> ResearchHelperAgent:
     )
 
 
-def _evaluate(run_results, bench: LongMemEvalSettings, evaluator: LongMemEvalEvaluator):
+def _run_metadata(settings, bench: LongMemEvalSettings) -> dict:
+    """Run-level provenance recorded in summary.json."""
+    return {
+        "llm_provider": getattr(settings, "llm_provider", None),
+        "model_id": getattr(settings, "model_id", None),
+        "temperature": getattr(settings, "temperature", None),
+        "use_official_eval": bench.use_official_eval,
+        "metric_model": bench.metric_model,
+        "max_sessions": bench.max_sessions,
+        "allow_tools": bench.allow_tools,
+        "full_trajectory": bench.full_trajectory,
+    }
+
+
+def _make_reporter(settings, bench: LongMemEvalSettings) -> LongMemEvalReporter:
+    return LongMemEvalReporter(
+        results_root=bench.output_dir,
+        full_trajectory=bench.full_trajectory,
+        run_metadata=_run_metadata(settings, bench),
+    )
+
+
+def _evaluate(
+    run_results,
+    bench: LongMemEvalSettings,
+    evaluator: LongMemEvalEvaluator,
+    eval_output_dir: str,
+):
     """Score run results with the official judge or the local heuristic."""
     if bench.use_official_eval:
         eval_results = evaluator.evaluate_batch_official(
@@ -52,7 +79,7 @@ def _evaluate(run_results, bench: LongMemEvalSettings, evaluator: LongMemEvalEva
             ref_file=bench.data_file,
             metric_model=bench.metric_model,
             official_root=bench.official_root,
-            output_dir=bench.output_dir,
+            output_dir=eval_output_dir,
             judge_api_key=bench.judge_api_key,
             judge_base_url=bench.judge_base_url,
         )
@@ -89,12 +116,22 @@ def run_single(bench: LongMemEvalSettings) -> None:
     print(f"Running question {episode.episode_id} ({episode.metadata['num_sessions']} sessions)...")
     run_result = runner.run_episode(episode)
 
+    # Standardized immutable run layout (see ResultFormat.md). Raw artifacts
+    # are written as soon as the episode finishes; official-judge artifacts
+    # (hypotheses.jsonl etc.) land in the run's raw/logs/ directory.
+    reporter = _make_reporter(settings, bench)
+    reporter.writer.write_raw(run_result, 0)
+
     evaluator = LongMemEvalEvaluator()
-    eval_results = _evaluate([run_result], bench, evaluator)
+    eval_results = _evaluate(
+        [run_result], bench, evaluator, eval_output_dir=reporter.writer.logs_dir
+    )
     eval_result = eval_results[0]
 
-    reporter = LongMemEvalReporter(bench.output_dir, full_trajectory=bench.full_trajectory)
-    reporter.write_per_sample_report(run_result, eval_result)
+    reporter.writer.append_case(
+        run_result, eval_result, 0, **reporter.case_fields(run_result, eval_result)
+    )
+    run_dir = reporter.finalize([run_result], eval_results)
 
     print(f"\n{'=' * 50}")
     print(f"Question ({episode.metadata.get('question_type')}): {run_result.question}")
@@ -104,7 +141,7 @@ def run_single(bench: LongMemEvalSettings) -> None:
     print(f"Reason: {eval_result.correctness_reason}")
     if run_result.error:
         print(f"Error: {run_result.error}")
-    print(f"Results saved to: {os.path.join(bench.output_dir, run_result.sample_id)}")
+    print(f"Results saved to: {run_dir}")
 
 
 def run_batch(bench: LongMemEvalSettings) -> None:
@@ -122,21 +159,36 @@ def run_batch(bench: LongMemEvalSettings) -> None:
     runner = LongMemEvalRunner(
         agent, LongMemEvalAdapter(), max_sessions=bench.max_sessions, verbose=bench.verbose
     )
+
+    # Standardized immutable run layout (see ResultFormat.md). Raw artifacts
+    # are written ACTIVELY as each streamed episode finishes.
+    reporter = _make_reporter(settings, bench)
+
     print("Running batch (streaming)...")
-    run_results = runner.run_batch(episodes_iter, verbose=bench.verbose)
+    run_results = runner.run_batch(
+        episodes_iter,
+        verbose=bench.verbose,
+        on_result=reporter.writer.write_raw,
+    )
     if not run_results:
         print("No episodes ran.")
         return
 
     evaluator = LongMemEvalEvaluator()
-    eval_results = _evaluate(run_results, bench, evaluator)
+    eval_results = _evaluate(
+        run_results, bench, evaluator, eval_output_dir=reporter.writer.logs_dir
+    )
 
-    reporter = LongMemEvalReporter(bench.output_dir, full_trajectory=bench.full_trajectory)
-    reporter.write_full_report(run_results, eval_results)
-    for run_result, eval_result in zip(run_results, eval_results):
-        reporter.write_per_sample_report(run_result, eval_result)
+    for index, (run_result, eval_result) in enumerate(zip(run_results, eval_results)):
+        reporter.writer.append_case(
+            run_result,
+            eval_result,
+            index,
+            **reporter.case_fields(run_result, eval_result),
+        )
+    run_dir = reporter.finalize(run_results, eval_results)
 
-    agg = reporter._aggregate_metrics(run_results, eval_results)
+    agg = reporter.aggregate_metrics(run_results, eval_results)
     print(f"\n{'=' * 50}")
     print("LongMemEval Summary")
     print(f"Total questions: {agg['total_samples']}")
@@ -148,7 +200,7 @@ def run_batch(bench: LongMemEvalSettings) -> None:
         counts = agg["per_type_counts"][qtype]
         print(f"  {qtype}: {acc:.2%} ({counts['correct']}/{counts['total']})")
     print(f"Errors: {agg['error_count']}")
-    print(f"Results saved to: {bench.output_dir}")
+    print(f"Results saved to: {run_dir}")
 
 
 def main() -> None:

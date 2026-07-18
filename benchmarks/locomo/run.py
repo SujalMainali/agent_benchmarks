@@ -67,6 +67,18 @@ def setup_agent(settings, benchmark_settings) -> ResearchHelperAgent:
     )
 
 
+def _run_metadata(settings, benchmark_settings) -> dict:
+    """Collect run-level provenance recorded in summary.json."""
+    return {
+        "llm_provider": getattr(settings, "llm_provider", None),
+        "model_id": getattr(settings, "model_id", None),
+        "temperature": getattr(settings, "temperature", None),
+        "prompt_mode": benchmark_settings.prompt_mode,
+        "use_official_eval": benchmark_settings.use_official_eval,
+        "allow_tools": benchmark_settings.allow_tools,
+    }
+
+
 def run_single_sample(
     data_file: str,
     sample_id: Optional[str] = None,
@@ -141,10 +153,12 @@ def run_single_sample(
     else:
         eval_results = [evaluator.evaluate(r) for r in run_results]
 
-    # Report
-    reporter = LoCoMoReporter(output_dir)
-    for run_result, eval_result in zip(run_results, eval_results):
-        reporter.write_per_sample_report(run_result, eval_result)
+    # Report (standardized immutable run layout — see ResultFormat.md).
+    reporter = LoCoMoReporter(
+        results_root=output_dir,
+        run_metadata=_run_metadata(settings, benchmark_settings),
+    )
+    run_dir = reporter.write_batch(run_results, eval_results)
 
     # Print per-QA-item results
     for episode, run_result, eval_result in zip(episodes, run_results, eval_results):
@@ -158,7 +172,7 @@ def run_single_sample(
         print(f"Reason: {eval_result.correctness_reason}")
         print(f"Total Latency: {run_result.total_latency_ms:.2f}ms")
         print(f"Turns: {len(run_result.trajectory)}")
-        print(f"Results saved to: {os.path.join(output_dir, episode.episode_id)}")
+    print(f"\nResults saved to: {run_dir}")
 
     # Print aggregate summary across the sample's QA items
     correct = sum(1 for r in eval_results if r.is_correct)
@@ -220,17 +234,13 @@ def run_batch(
     else:
         eval_results = [evaluator.evaluate(r) for r in run_results]
 
-    # Report
-    print(f"Writing reports to {output_dir}...")
-    os.makedirs(output_dir, exist_ok=True)
-    reporter = LoCoMoReporter(output_dir)
-
-    # Write overall report
-    reporter.write_full_report(run_results, eval_results)
-
-    # Write per-sample reports
-    for run_result, eval_result in zip(run_results, eval_results):
-        reporter.write_per_sample_report(run_result, eval_result)
+    # Report (standardized immutable run layout — see ResultFormat.md).
+    print(f"Writing reports under {output_dir}...")
+    reporter = LoCoMoReporter(
+        results_root=output_dir,
+        run_metadata=_run_metadata(settings, benchmark_settings),
+    )
+    run_dir = reporter.write_batch(run_results, eval_results)
 
     # Print summary
     correct = sum(1 for r in eval_results if r.is_correct)
@@ -242,7 +252,7 @@ def run_batch(
     print(f"Total: {total}")
     print(f"Correct: {correct}")
     print(f"Accuracy: {accuracy:.2%}")
-    print(f"Results saved to: {output_dir}")
+    print(f"Results saved to: {run_dir}")
 
 
 def main() -> None:

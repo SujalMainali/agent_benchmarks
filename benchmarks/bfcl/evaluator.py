@@ -136,10 +136,10 @@ class BFCLEvaluator(BenchmarkEvaluator):
         return self._to_evaluation_result(entry_id, test_category, official_result)
 
     def write_report(self, results: list[EvaluationResult], output_dir: str) -> None:
-        """Reports are handled by ``BFCLReporter``; kept for interface parity."""
-        from .report import BFCLReporter
-
-        BFCLReporter(output_dir).write_evaluation_results(results)
+        """Deprecated: reports are written by ``BFCLReporter`` in the run entry
+        point (standardized ResultFormat layout). Kept only for interface
+        parity; intentionally a no-op."""
+        return None
 
     # -- internals ----------------------------------------------------------
 

@@ -1,9 +1,9 @@
-"""BFCL report generation — official verdicts -> repository report artifacts.
+"""BFCL reporting on the standardized ResultFormat layout.
 
-Reuses the shared ``ReportWriter`` (same layout as LoCoMo/ToolSandbox
-reports) plus a BFCL result file that mirrors the official
-``result/.../*_result.json`` JSON-lines layout (id + result + latency +
-token counts + inference log per LOG_GUIDE.md).
+Official checker verdicts land in each case's ``benchmark_specific`` block; a
+mirror of the official ``result/.../*_result.json`` JSON-lines layout (id +
+result + latency + token counts + inference log per LOG_GUIDE.md) is written
+under the run's ``raw/logs/official_format/``.
 """
 
 from __future__ import annotations
@@ -11,62 +11,84 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence
 
+from benchmarks.common.base_reporter import StandardReporter
 from benchmarks.common.models import EvaluationResult, RunResult
-from benchmarks.common.report_writer import ReportWriter
 
 
-class BFCLReporter:
-    """Writes BFCL benchmark artifacts using the shared report classes."""
+class BFCLReporter(StandardReporter):
+    """Writes BFCL runs in the standardized immutable run layout."""
 
-    def __init__(self, output_dir: str) -> None:
-        self.output_dir = output_dir
-        self.report_writer = ReportWriter(output_dir)
-        os.makedirs(output_dir, exist_ok=True)
+    benchmark = "bfcl"
 
-    def write_full_report(
+    def __init__(
         self,
-        run_results: List[RunResult],
-        eval_results: List[EvaluationResult],
+        *,
+        dataset: str = "bfcl",
+        results_root: str = "results",
+        benchmark_version: str = "v4",
+        memory_architecture: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        run_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Write batch-level artifacts (results, summary, markdown, metrics)."""
-        metrics = {
-            "batch_metrics": self._batch_metrics(run_results, eval_results),
-            "per_category": self._per_category_metrics(eval_results),
-        }
-        self.report_writer.write_metrics(metrics)
-        self.report_writer.write_evaluation_results(eval_results)
-        self.report_writer.write_csv_summary(eval_results)
-
-        total = len(eval_results)
-        correct = sum(1 for r in eval_results if r.is_correct)
-        self.report_writer.write_markdown_report(
-            title="BFCL Benchmark Report",
-            eval_results=eval_results,
-            metrics={
-                "total_samples": total,
-                "correct": correct,
-                "accuracy": correct / total if total else 0.0,
-                "average_score": (
-                    sum(r.score for r in eval_results) / total if total else 0.0
-                ),
-            },
+        super().__init__(
+            dataset=dataset,
+            results_root=results_root,
+            benchmark_version=benchmark_version,
+            memory_architecture=memory_architecture,
+            agent_name=agent_name,
+            run_metadata=run_metadata,
         )
 
-        self._write_official_style_results(run_results)
-
-    def write_per_sample_report(
+    def case_fields(
         self, run_result: RunResult, eval_result: EvaluationResult
-    ) -> None:
-        """Write per-entry artifacts under ``<output_dir>/<entry_id>/``."""
-        subdir = run_result.sample_id
-        self.report_writer.write_run_results(run_result, subdir=subdir)
-        self.report_writer.write_trace(run_result, subdir=subdir)
-        self.report_writer.write_evaluation(eval_result, subdir=subdir)
+    ) -> Dict[str, Any]:
+        metadata = run_result.metadata or {}
+        category = str(
+            eval_result.diagnostics.get(
+                "category", metadata.get("test_category", "unknown")
+            )
+        )
+        return {
+            "task_family": "function_calling",
+            "task_type": category,
+            "benchmark_metrics": run_result.metrics,
+            "expected_tool_behavior": metadata.get("possible_answer"),
+            "benchmark_specific": {
+                "test_category": category,
+                "official_eval": run_result.official_eval,
+                "raw_response": metadata.get("raw_response", ""),
+            },
+        }
 
-    def write_evaluation_results(self, eval_results: List[EvaluationResult]) -> None:
-        self.report_writer.write_evaluation_results(eval_results)
+    def aggregate_metrics(
+        self,
+        run_results: Sequence[RunResult],
+        eval_results: Sequence[EvaluationResult],
+    ) -> Dict[str, Any]:
+        total = len(eval_results)
+        correct = sum(1 for r in eval_results if r.is_correct)
+        return {
+            "total_samples": total,
+            "correct": correct,
+            "accuracy": correct / total if total else 0.0,
+            "total_latency_ms": sum(r.total_latency_ms for r in run_results),
+            "average_latency_ms": (
+                sum(r.total_latency_ms for r in run_results) / len(run_results)
+                if run_results
+                else 0.0
+            ),
+            "per_category": self._per_category_metrics(eval_results),
+        }
+
+    def finalize(
+        self,
+        run_results: Sequence[RunResult],
+        eval_results: Sequence[EvaluationResult],
+    ) -> str:
+        self._write_official_style_results(list(run_results))
+        return super().finalize(run_results, eval_results)
 
     # -- internals ----------------------------------------------------------
 
@@ -82,11 +104,11 @@ class BFCLReporter:
             category = str(run_result.metadata.get("test_category", "unknown"))
             by_category[category].append(run_result)
 
-        result_dir = os.path.join(self.output_dir, "official_format")
+        result_dir = os.path.join(self.writer.logs_dir, "official_format")
         os.makedirs(result_dir, exist_ok=True)
         for category, results in by_category.items():
             path = os.path.join(result_dir, f"BFCL_{category}_result.json")
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 for run_result in results:
                     entry: Dict[str, Any] = {
                         "id": run_result.sample_id,
@@ -103,27 +125,8 @@ class BFCLReporter:
                     f.write(json.dumps(entry, default=str) + "\n")
 
     @staticmethod
-    def _batch_metrics(
-        run_results: List[RunResult], eval_results: List[EvaluationResult]
-    ) -> Dict[str, Any]:
-        total = len(eval_results)
-        correct = sum(1 for r in eval_results if r.is_correct)
-        return {
-            "total_samples": total,
-            "correct": correct,
-            "accuracy": correct / total if total else 0.0,
-            "total_latency_ms": sum(r.total_latency_ms for r in run_results),
-            "average_latency_ms": (
-                sum(r.total_latency_ms for r in run_results) / len(run_results)
-                if run_results
-                else 0.0
-            ),
-            "errors": sum(1 for r in run_results if r.error),
-        }
-
-    @staticmethod
     def _per_category_metrics(
-        eval_results: List[EvaluationResult],
+        eval_results: Sequence[EvaluationResult],
     ) -> Dict[str, Dict[str, Any]]:
         by_category: Dict[str, List[EvaluationResult]] = defaultdict(list)
         for result in eval_results:

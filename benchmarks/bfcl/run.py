@@ -98,11 +98,29 @@ def main() -> None:
 
     # Build the LLM through the provider factory (never a raw SDK).
     print("Setting up agent LLM provider...")
-    llm = build_provider(load_settings())
+    agent_settings = load_settings()
+    llm = build_provider(agent_settings)
+
+    # Standardized immutable run layout (see ResultFormat.md). Raw artifacts
+    # are written ACTIVELY as each entry finishes.
+    reporter = BFCLReporter(
+        results_root=settings.output_dir,
+        dataset=",".join(settings.test_categories),
+        run_metadata={
+            "llm_provider": getattr(agent_settings, "llm_provider", None),
+            "model_id": getattr(agent_settings, "model_id", None),
+            "temperature": getattr(agent_settings, "temperature", None),
+            "checker_model_name": settings.checker_model_name,
+            "max_tool_steps": settings.max_tool_steps,
+            "resolved_categories": categories,
+        },
+    )
 
     # Run.
     runner = BFCLRunner(llm=llm, max_tool_steps=settings.max_tool_steps)
-    run_results = runner.run_batch(episodes, verbose=settings.verbose)
+    run_results = runner.run_batch(
+        episodes, verbose=settings.verbose, on_result=reporter.writer.write_raw
+    )
 
     # Evaluate with the official checkers.
     print("Evaluating with the official BFCL evaluator...")
@@ -112,11 +130,15 @@ def main() -> None:
         run_result.official_eval = eval_result.diagnostics.get("official_eval", {})
 
     # Report.
-    print(f"Writing reports to {settings.output_dir}...")
-    reporter = BFCLReporter(settings.output_dir)
-    reporter.write_full_report(run_results, eval_results)
-    for run_result, eval_result in zip(run_results, eval_results):
-        reporter.write_per_sample_report(run_result, eval_result)
+    print(f"Writing reports under {settings.output_dir}...")
+    for index, (run_result, eval_result) in enumerate(zip(run_results, eval_results)):
+        reporter.writer.append_case(
+            run_result,
+            eval_result,
+            index,
+            **reporter.case_fields(run_result, eval_result),
+        )
+    run_dir = reporter.finalize(run_results, eval_results)
 
     # Summary.
     total = len(eval_results)
@@ -126,7 +148,7 @@ def main() -> None:
     print(f"Total entries: {total}")
     print(f"Correct: {correct}")
     print(f"Accuracy: {correct / total:.2%}" if total else "Accuracy: n/a")
-    print(f"Results saved to: {settings.output_dir}")
+    print(f"Results saved to: {run_dir}")
 
 
 if __name__ == "__main__":

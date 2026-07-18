@@ -124,14 +124,24 @@ class ToolSandboxRunner:
         self,
         episodes: List[Episode],
         verbose: bool = True,
+        on_result: Optional[Any] = None,
     ) -> List[RunResult]:
-        """Run multiple scenarios sequentially (each in a fresh worker)."""
+        """Run multiple scenarios sequentially (each in a fresh worker).
+
+        Args:
+            on_result: Optional ``(run_result, index) -> None`` callback fired
+                as each scenario finishes — used to write raw artifacts
+                actively during the run.
+        """
         results: List[RunResult] = []
         for index, episode in enumerate(episodes):
             name = episode.metadata.get("scenario_name", episode.episode_id)
             if verbose:
                 print(f"Running scenario {index + 1}/{len(episodes)}: {name}")
-            results.append(self.run_episode(episode))
+            result = self.run_episode(episode)
+            results.append(result)
+            if on_result is not None:
+                on_result(result, index)
         return results
 
     # -- internals ----------------------------------------------------------

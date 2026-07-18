@@ -78,13 +78,27 @@ class BFCLRunner:
             error=bridge_result["error"],
         )
 
-    def run_batch(self, episodes: List[Episode], verbose: bool = True) -> List[RunResult]:
-        """Run multiple entries sequentially."""
+    def run_batch(
+        self,
+        episodes: List[Episode],
+        verbose: bool = True,
+        on_result: Optional[Any] = None,
+    ) -> List[RunResult]:
+        """Run multiple entries sequentially.
+
+        Args:
+            on_result: Optional ``(run_result, index) -> None`` callback fired
+                as each entry finishes — used to write raw artifacts actively
+                during the run.
+        """
         results: List[RunResult] = []
         for index, episode in enumerate(episodes):
             if verbose:
                 print(f"Running entry {index + 1}/{len(episodes)}: {episode.episode_id}")
-            results.append(self.run_episode(episode))
+            result = self.run_episode(episode)
+            results.append(result)
+            if on_result is not None:
+                on_result(result, index)
         return results
 
     # -- internals ----------------------------------------------------------

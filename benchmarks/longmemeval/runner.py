@@ -178,12 +178,18 @@ class LongMemEvalRunner:
         self,
         episodes_iter: Iterator[Episode],
         verbose: bool | None = None,
+        on_result: Optional[Any] = None,
     ) -> List[RunResult]:
         """Consume an episode ITERATOR (streaming) and collect RunResults.
 
         After each episode the episode's sessions are dropped to keep memory
         flat across a 500-entry ``_m`` batch; metadata retains everything the
         evaluator/report need.
+
+        Args:
+            on_result: Optional ``(run_result, index) -> None`` callback fired
+                as each episode finishes — used to write raw artifacts actively
+                during the run rather than at the end of the batch.
         """
         show = self.verbose if verbose is None else verbose
         results: List[RunResult] = []
@@ -192,6 +198,8 @@ class LongMemEvalRunner:
                 print(f"Running episode {i + 1}: {episode.episode_id}")
             result = self.run_episode(episode)
             results.append(result)
+            if on_result is not None:
+                on_result(result, i)
             if result.episode is not None:
                 result.episode.task.context.pop("haystack_sessions", None)
         return results

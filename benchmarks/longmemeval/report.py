@@ -1,19 +1,20 @@
-"""LongMemEval report generation.
+"""LongMemEval reporting on the standardized ResultFormat layout.
 
 Mirrors ``print_qa_metrics.py`` aggregation (per-type accuracy, task-averaged
-accuracy, overall accuracy, abstention accuracy) as report conversion — the QA
-scoring itself stays inside the official judge. Also truncates the heavy
-history-replay trajectory/raw_messages unless full-trajectory mode is on.
+accuracy, overall accuracy, abstention accuracy) as the summary metrics block —
+the QA scoring itself stays inside the official judge. Unless full-trajectory
+mode is on, the heavy history-replay events are collapsed to one-line
+summaries before landing in ``raw/trajectories/`` (the final-question turn is
+always kept verbatim).
 """
 
 from __future__ import annotations
 
-import json
-import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence
 
-from benchmarks.common.models import EvaluationResult, RunResult, Trajectory
-from benchmarks.common.report_writer import ReportWriter
+from benchmarks.common.base_reporter import StandardReporter
+from benchmarks.common.models import EvaluationResult, RunResult, TrajectoryEvent
+from benchmarks.common.result_writer import ExperimentRunWriter
 
 _QUESTION_TYPES = [
     "single-session-user",
@@ -25,45 +26,99 @@ _QUESTION_TYPES = [
 ]
 
 
-class LongMemEvalReporter:
-    """Generates LongMemEval batch + per-sample reports."""
+def _compact_replay_events(
+    run_result: RunResult, events: List[TrajectoryEvent]
+) -> List[Dict[str, Any]]:
+    """Collapse history-replay events to one-line summaries; keep question.
 
-    def __init__(self, output_dir: str, full_trajectory: bool = False) -> None:
-        self.output_dir = output_dir
-        self.full_trajectory = full_trajectory
-        self.report_writer = ReportWriter(output_dir)
-        os.makedirs(output_dir, exist_ok=True)
+    The frozen runtime tags trajectory events with stream-step metadata, not
+    the observation's ``phase`` — so the final-question turn is identified as
+    the group of events sharing the highest ``turn_number`` (each ``act()``
+    call shares one turn_number; the question is the last act).
+    """
+    question_start: Optional[int] = None
+    if events:
+        max_turn = max(event.turn_number for event in events)
+        for i, event in enumerate(events):
+            if event.turn_number == max_turn:
+                question_start = i
+                break
 
-    def write_full_report(
+    compact: List[Dict[str, Any]] = []
+    for i, event in enumerate(events):
+        if question_start is not None and i >= question_start:
+            # Final-question turn: keep the full event record.
+            compact.append(ExperimentRunWriter._event_dict(event))
+        else:
+            compact.append(
+                {
+                    "event_type": event.event_type,
+                    "turn_number": event.turn_number,
+                    "session_id": event.metadata.get("session_id"),
+                    "chars": len(event.agent_message or "")
+                    + len(event.user_input or ""),
+                    "replay_summary": True,
+                }
+            )
+    return compact
+
+
+class LongMemEvalReporter(StandardReporter):
+    """Writes LongMemEval runs in the standardized immutable run layout."""
+
+    benchmark = "longmemeval"
+
+    def __init__(
         self,
-        run_results: List[RunResult],
-        eval_results: List[EvaluationResult],
+        *,
+        dataset: str = "longmemeval",
+        results_root: str = "results",
+        benchmark_version: str = "v1",
+        full_trajectory: bool = False,
+        memory_architecture: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        run_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        metrics = self._aggregate_metrics(run_results, eval_results)
-        self.report_writer.write_metrics(metrics)
-        self.report_writer.write_evaluation_results(eval_results)
-        self.report_writer.write_csv_summary(eval_results)
-
-        summary_metrics = {
-            "total_samples": len(eval_results),
-            "correct": sum(1 for r in eval_results if r.is_correct),
-            "accuracy": metrics["overall_accuracy"],
-            "average_score": (
-                sum(r.score for r in eval_results) / len(eval_results)
-                if eval_results
-                else 0.0
-            ),
-        }
-        self.report_writer.write_markdown_report(
-            title="LongMemEval Benchmark Report",
-            eval_results=eval_results,
-            metrics=summary_metrics,
+        self.full_trajectory = full_trajectory
+        super().__init__(
+            dataset=dataset,
+            results_root=results_root,
+            benchmark_version=benchmark_version,
+            memory_architecture=memory_architecture,
+            agent_name=agent_name,
+            run_metadata=run_metadata,
+            event_transform=None if full_trajectory else _compact_replay_events,
+            include_raw_messages=full_trajectory,
         )
 
-    def _aggregate_metrics(
+    def case_fields(
+        self, run_result: RunResult, eval_result: EvaluationResult
+    ) -> Dict[str, Any]:
+        question_type = str(
+            eval_result.diagnostics.get(
+                "question_type",
+                (run_result.metadata or {}).get("question_type", "unknown"),
+            )
+        )
+        return {
+            "task_family": "long_memory_qa",
+            "task_type": question_type,
+            "benchmark_metrics": run_result.metrics,
+            "benchmark_specific": {
+                "question_type": question_type,
+                "is_abstention": bool(eval_result.diagnostics.get("is_abstention")),
+                "official_eval": run_result.official_eval,
+                "num_sessions": (run_result.metadata or {}).get("num_sessions"),
+                "sessions_replayed": (run_result.metrics or {}).get(
+                    "sessions_replayed"
+                ),
+            },
+        }
+
+    def aggregate_metrics(
         self,
-        run_results: List[RunResult],
-        eval_results: List[EvaluationResult],
+        run_results: Sequence[RunResult],
+        eval_results: Sequence[EvaluationResult],
     ) -> Dict[str, Any]:
         """Per-type / task-averaged / abstention accuracy + run metrics."""
         total = len(eval_results)
@@ -110,99 +165,3 @@ class LongMemEvalReporter:
             "mean_sessions_replayed": (sum(sessions) / len(sessions) if sessions else 0.0),
             "mean_latency_ms": (sum(latencies) / len(latencies) if latencies else 0.0),
         }
-
-    def write_per_sample_report(
-        self, run_result: RunResult, eval_result: EvaluationResult
-    ) -> None:
-        sample_dir = os.path.join(self.output_dir, run_result.sample_id)
-        os.makedirs(sample_dir, exist_ok=True)
-
-        if self.full_trajectory:
-            self.report_writer.write_trajectory(run_result, subdir=run_result.sample_id)
-        else:
-            self._write_truncated_trajectory(run_result, sample_dir)
-
-        self.report_writer.write_evaluation(eval_result, subdir=run_result.sample_id)
-
-        analysis = {
-            "sample_id": run_result.sample_id,
-            "episode_id": run_result.episode_id or run_result.sample_id,
-            "question": run_result.question,
-            "gold_answer": run_result.gold_answer,
-            "predicted_answer": run_result.predicted_answer,
-            "benchmark_mode": run_result.benchmark_mode,
-            "context_turn_count": run_result.context_turn_count,
-            "official_eval": run_result.official_eval,
-            "is_correct": eval_result.is_correct,
-            "score": eval_result.score,
-            "correctness_reason": eval_result.correctness_reason,
-            "failure_mode": eval_result.failure_mode,
-            "metrics": run_result.metrics,
-            "diagnostics": eval_result.diagnostics,
-            "error": run_result.error,
-        }
-        with open(os.path.join(sample_dir, "analysis.json"), "w") as f:
-            json.dump(analysis, f, indent=2, default=str)
-
-    def _write_truncated_trajectory(self, run_result: RunResult, sample_dir: str) -> None:
-        """Collapse history-replay events to one-line summaries; keep question.
-
-        The frozen runtime tags trajectory events with stream-step metadata, not
-        the observation's ``phase`` — so we identify the final-question turn as
-        the group of events sharing the highest ``turn_number`` (each ``act()``
-        call shares one turn_number; the question is the last act). This is the
-        plan's documented fallback ("last replay session + everything after it").
-        """
-        events = (
-            run_result.trajectory.events
-            if isinstance(run_result.trajectory, Trajectory)
-            else run_result.trajectory
-        )
-
-        question_start = None
-        if events:
-            max_turn = max(event.turn_number for event in events)
-            for i, event in enumerate(events):
-                if event.turn_number == max_turn:
-                    question_start = i
-                    break
-
-        compact: List[Dict[str, Any]] = []
-        for i, event in enumerate(events):
-            in_question = question_start is not None and i >= question_start
-            if in_question:
-                compact.append(
-                    {
-                        "event_type": event.event_type,
-                        "turn_number": event.turn_number,
-                        "agent_message": event.agent_message,
-                        "phase": event.metadata.get("phase"),
-                    }
-                )
-            else:
-                compact.append(
-                    {
-                        "event_type": event.event_type,
-                        "turn_number": event.turn_number,
-                        "session_id": event.metadata.get("session_id"),
-                        "chars": len(event.agent_message or "")
-                        + len(event.user_input or ""),
-                    }
-                )
-
-        raw = run_result.raw_messages or []
-        # Cap raw_messages to the final-question slice (heuristic: keep the last 4).
-        tail = raw[-4:] if len(raw) > 4 else raw
-        data = {
-            "sample_id": run_result.sample_id,
-            "episode_id": run_result.episode_id or run_result.sample_id,
-            "question": run_result.question,
-            "benchmark_mode": run_result.benchmark_mode,
-            "context_turn_count": run_result.context_turn_count,
-            "official_eval": run_result.official_eval,
-            "events": compact,
-            "raw_messages": tail,
-            "raw_messages_truncated": max(len(raw) - len(tail), 0),
-        }
-        with open(os.path.join(sample_dir, "trajectory.json"), "w") as f:
-            json.dump(data, f, indent=2, default=str)
