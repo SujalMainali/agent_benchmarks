@@ -31,10 +31,20 @@ def _resolve_user_mode(settings: ToolSandboxSettings) -> str:
     """Map config to the runner's user-simulator mode.
 
     ``scripted`` (default) replays the scenario and needs no external creds. An
-    official OpenAI user simulator is used when TOOLSANDBOX_USER_MODE names one.
+    official OpenAI user simulator is used when TOOLSANDBOX_USER_MODE names one,
+    which requires a real OpenAI key in TOOLSANDBOX_USER_API_KEY (the simulator
+    talks to api.openai.com directly; the project-level OPENAI_API_KEY is the
+    local agent model's placeholder).
     """
     mode = os.getenv("TOOLSANDBOX_USER_MODE", "scripted").strip().lower()
-    return mode or "scripted"
+    mode = mode or "scripted"
+    if mode != "scripted" and not settings.user_api_key:
+        raise SystemExit(
+            f"TOOLSANDBOX_USER_MODE={mode!r} needs TOOLSANDBOX_USER_API_KEY "
+            "(a real OpenAI key for the official user simulator). Set it or "
+            "use TOOLSANDBOX_USER_MODE=scripted."
+        )
+    return mode
 
 
 def _filter_episodes(
@@ -72,6 +82,10 @@ def _setup_runner(settings: ToolSandboxSettings) -> ToolSandboxRunner:
         max_tool_steps=settings.max_tool_steps,
         fault_rate=settings.fault_rate,
         fault_seed=settings.fault_seed,
+        real_search_tools=settings.real_search_tools,
+        rapid_api_key=settings.rapid_api_key,
+        user_api_key=settings.user_api_key,
+        user_base_url=settings.user_base_url,
     )
 
 

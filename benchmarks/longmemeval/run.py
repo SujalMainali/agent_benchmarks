@@ -53,6 +53,8 @@ def _evaluate(run_results, bench: LongMemEvalSettings, evaluator: LongMemEvalEva
             metric_model=bench.metric_model,
             official_root=bench.official_root,
             output_dir=bench.output_dir,
+            judge_api_key=bench.judge_api_key,
+            judge_base_url=bench.judge_base_url,
         )
     else:
         eval_results = [evaluator.evaluate(r) for r in run_results]

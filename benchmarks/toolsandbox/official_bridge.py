@@ -59,11 +59,19 @@ class ToolSandboxClient:
         official_root: str = "third_party/ToolSandbox-official",
         inference_fn: Optional[Any] = None,
         agent_turn_fn: Optional[Callable[..., str]] = None,
+        real_search_tools: bool = False,
+        rapid_api_key: Optional[str] = None,
+        user_api_key: Optional[str] = None,
+        user_base_url: Optional[str] = None,
     ) -> None:
         self.python_executable = python_executable
         self.official_root = official_root
         self.inference_fn = inference_fn
         self.agent_turn_fn = agent_turn_fn
+        self.real_search_tools = real_search_tools
+        self.rapid_api_key = rapid_api_key
+        self.user_api_key = user_api_key
+        self.user_base_url = user_base_url
 
     # -- public API ---------------------------------------------------------
 
@@ -136,6 +144,20 @@ class ToolSandboxClient:
         existing = env.get("PYTHONPATH", "")
         parts = [str(PROJECT_ROOT)] + ([existing] if existing else [])
         env["PYTHONPATH"] = os.pathsep.join(parts)
+        # Search-tool backend selection: RAPID_API_KEY reaches the worker only
+        # when real tools were requested, so simulated runs can never leak a
+        # real web request even if a key is present in the parent env.
+        if self.real_search_tools:
+            env["TOOLSANDBOX_REAL_SEARCH_TOOLS"] = "true"
+            if self.rapid_api_key:
+                env["RAPID_API_KEY"] = self.rapid_api_key
+        else:
+            env["TOOLSANDBOX_REAL_SEARCH_TOOLS"] = "false"
+            env.pop("RAPID_API_KEY", None)
+        if self.user_api_key:
+            env["TOOLSANDBOX_USER_API_KEY"] = self.user_api_key
+        if self.user_base_url:
+            env["TOOLSANDBOX_USER_BASE_URL"] = self.user_base_url
         return env
 
     def _spawn(self, args: List[str]) -> subprocess.Popen:

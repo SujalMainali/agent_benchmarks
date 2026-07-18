@@ -1,0 +1,13 @@
+model_list:
+  - model_name: gpt-4o-2024-05-13  # The pinned name the framework looks for
+    litellm_params:
+      model: openai/deepseek-ai/deepseek-v4-flash # Your Nvidia NIM model identifier
+      api_base: https://integrate.api.nvidia.com/v1
+      api_key: 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
+
+
+  - model_name: gpt-4o-2024-08-06
+    litellm_params:
+      model: openai/deepseek-ai/deepseek-v4-flash
+      api_base: https://integrate.api.nvidia.com/v1
+      api_key: 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

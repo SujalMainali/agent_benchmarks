@@ -215,6 +215,134 @@ def _load_named_scenarios() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Search tools backend: simulated (default) vs real RapidAPI
+# ---------------------------------------------------------------------------
+
+# Ground-truth constants aligned with the official scenario milestones
+# (single_tool_call_scenarios.py): the reverse-geocode address and Apple Park
+# phone number are string-compared (ROUGE-L) against the agent's final answer.
+_SIM_ADDRESS = "Apple Park 1 Apple Park Way Cupertino, CA 95014 United States"
+_SIM_PHONE = "+14089961010"
+_SIM_STOCKS = {
+    "apple": {"name": "Apple Inc", "symbol": "AAPL:NASDAQ", "exchange": "NASDAQ"},
+    "aapl": {"name": "Apple Inc", "symbol": "AAPL:NASDAQ", "exchange": "NASDAQ"},
+    "nasdaq": {"name": "Apple Inc", "symbol": "AAPL:NASDAQ", "exchange": "NASDAQ"},
+}
+_SIM_FX_RATES = {("USD", "CNY"): 7.24, ("USD", "EUR"): 0.92, ("USD", "JPY"): 157.0,
+                 ("USD", "GBP"): 0.79, ("EUR", "USD"): 1.09, ("CNY", "USD"): 0.138}
+
+_SIM_DAY = {
+    "maxtemp_c": 18.0, "maxtemp_f": 64.4, "mintemp_c": 9.0, "mintemp_f": 48.2,
+    "avgtemp_c": 13.5, "avgtemp_f": 56.3, "maxwind_kph": 20.5, "maxwind_mph": 12.7,
+    "avgvis_km": 10.0, "avgvis_miles": 6.0, "avghumidity": 65,
+    "totalprecip_mm": 0.0, "totalprecip_in": 0.0,
+    "condition": {"text": "Partly cloudy"},
+}
+_SIM_CURRENT = {
+    "temp_c": 15.0, "temp_f": 59.0, "feelslike_c": 14.0, "feelslike_f": 57.2,
+    "vis_km": 10.0, "vis_miles": 6.0, "wind_kph": 11.2, "wind_mph": 7.0,
+    "pressure_mb": 1016.0, "pressure_in": 30.0, "precip_mm": 0.0, "precip_in": 0.0,
+    "humidity": 60, "condition": {"text": "Partly cloudy"},
+}
+
+
+def _simulated_rapid_api_get_request(
+    url: str, params: Dict[str, Any], headers: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Deterministic offline stand-in for ``rapid_api_get_request``.
+
+    Mirrors the real function's WiFi gate (scenarios like ``wifi_off`` rely on
+    the ConnectionError), then returns canned payloads shaped exactly like each
+    RapidAPI service so the tools' response-parsing code runs unchanged.
+    """
+    from tool_sandbox.tools.setting import get_wifi_status
+
+    if not get_wifi_status():
+        raise ConnectionError("Wifi is not enabled")
+
+    if "trueway-geocoding" in url:
+        return {"results": [{"address": _SIM_ADDRESS}]}
+
+    if "maps-data" in url:
+        return {
+            "data": [
+                {
+                    "name": str(params.get("query", "")),
+                    "full_address": _SIM_ADDRESS,
+                    "phone_number": _SIM_PHONE,
+                    "latitude": 37.334606,
+                    "longitude": -122.009102,
+                    "types": ["point_of_interest"],
+                    "rating": 4.7,
+                }
+            ]
+        }
+
+    if "weatherapi-com" in url:
+        day_count = max(1, int(params.get("days", 1)))
+        forecastday = [
+            {"day": dict(_SIM_DAY), "astro": {"sunrise": "06:12 AM", "sunset": "07:48 PM"}}
+            for _ in range(day_count)
+        ]
+        return {
+            "location": {
+                "name": "Cupertino", "region": "California", "country": "United States",
+                "lat": 37.33, "lon": -122.01, "tz_id": "America/Los_Angeles",
+            },
+            "current": dict(_SIM_CURRENT),
+            "forecast": {"forecastday": forecastday},
+        }
+
+    if "real-time-finance-data" in url:
+        query = str(params.get("query", "")).strip().lower()
+        stock = _SIM_STOCKS.get(query)
+        if stock is None:
+            symbol = "".join(c for c in query.upper() if c.isalpha())[:4] or "UNKN"
+            stock = {"name": query.title(), "symbol": f"{symbol}:NYSE", "exchange": "NYSE"}
+        return {
+            "data": {
+                "stock": [
+                    {**stock, "price": 210.0, "change": 1.05,
+                     "percent_change": 0.5, "currency": "USD"}
+                ]
+            }
+        }
+
+    if "currency-converter18" in url:
+        amount = float(params.get("amount", 0.0))
+        pair = (str(params.get("from", "")).upper(), str(params.get("to", "")).upper())
+        rate = _SIM_FX_RATES.get(pair)
+        if rate is None:
+            inverse = _SIM_FX_RATES.get((pair[1], pair[0]))
+            rate = (1.0 / inverse) if inverse else 1.0
+        return {"result": {"convertedAmount": amount * rate}}
+
+    raise RuntimeError(f"Simulated search backend has no handler for URL: {url}")
+
+
+def _configure_search_tools_backend() -> None:
+    """Choose real vs simulated search tools before any scenario executes.
+
+    Default is the simulated backend so runs are offline and deterministic.
+    TOOLSANDBOX_REAL_SEARCH_TOOLS=true keeps the official RapidAPI-backed
+    implementations, which require RAPID_API_KEY at call time.
+    """
+    real = os.environ.get("TOOLSANDBOX_REAL_SEARCH_TOOLS", "").strip().lower() in {
+        "1", "true", "yes", "y",
+    }
+    if real:
+        if "RAPID_API_KEY" not in os.environ:
+            raise RuntimeError(
+                "TOOLSANDBOX_REAL_SEARCH_TOOLS=true but RAPID_API_KEY is not set; "
+                "real search tools would fail on every call."
+            )
+        return
+    from tool_sandbox.tools import rapid_api_search_tools
+
+    rapid_api_search_tools.rapid_api_get_request = _simulated_rapid_api_get_request
+
+
+# ---------------------------------------------------------------------------
 # World-state / conversation / trace serialization from an ExecutionContext
 # ---------------------------------------------------------------------------
 
@@ -572,7 +700,48 @@ def _build_official_user(user_impl: str) -> Any:
         "gpt-4": GPT_4_0125_User,
         "gpt-3.5": GPT_3_5_0125_User,
     }
-    return mapping.get(user_impl.lower(), GPT_4_o_2024_05_13_User)()
+    # The official user simulator hardcodes base_url=https://api.openai.com/v1
+    # and reads OPENAI_API_KEY from the environment — which here is the local
+    # agent-model placeholder. TOOLSANDBOX_USER_API_KEY supplies the real key
+    # and TOOLSANDBOX_USER_BASE_URL an optional OpenAI-compatible endpoint
+    # (DeepSeek, LiteLLM, vLLM, ...). Note the simulator classes pin concrete
+    # model names (e.g. gpt-4o-2024-05-13); a custom endpoint must serve or
+    # alias the pinned name.
+    user_key = os.environ.get("TOOLSANDBOX_USER_API_KEY", "").strip()
+    if not user_key:
+        raise RuntimeError(
+            f"TOOLSANDBOX_USER_MODE={user_impl!r} uses the official OpenAI user "
+            "simulator, which needs a real key in "
+            "TOOLSANDBOX_USER_API_KEY. The project-level OPENAI_API_KEY points "
+            "at the local agent model and will not authenticate."
+        )
+    user_base_url = (
+        os.environ.get("TOOLSANDBOX_USER_BASE_URL", "").strip()
+        or "https://api.openai.com/v1"
+    )
+
+    import httpx
+    from openai import OpenAI
+
+    user_cls = mapping.get(user_impl.lower(), GPT_4_o_2024_05_13_User)
+
+    # Do NOT call the official __init__ (mirrors ProxyAgent above): it builds
+    # its own OpenAI() client bound to api.openai.com and reading OPENAI_API_KEY
+    # from the environment. Building the client ourselves lets us point at the
+    # configured key/endpoint directly. model_name is a class attribute, so it
+    # survives __new__; BaseRole defines no __init__ state we need.
+    #
+    # We also pass an explicit http_client: the openai SDK pinned in
+    # ToolSandboxEnv forwards a `proxies=` kwarg that httpx>=0.28 removed, so its
+    # default client construction raises TypeError. Supplying our own httpx
+    # client sidesteps that path entirely.
+    user_role = user_cls.__new__(user_cls)
+    user_role.openai_client = OpenAI(
+        api_key=user_key,
+        base_url=user_base_url,
+        http_client=httpx.Client(),
+    )
+    return user_role
 
 
 def _build_roles(
@@ -769,6 +938,7 @@ def _cmd_run_scenario(
 
 def main() -> None:
     _ensure_importable()
+    _configure_search_tools_backend()
 
     parser = argparse.ArgumentParser(description="ToolSandbox stdio worker")
     subparsers = parser.add_subparsers(dest="command", required=True)

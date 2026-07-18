@@ -56,6 +56,10 @@ class ToolSandboxRunner:
         max_tool_steps: int = 8,
         fault_rate: float = 0.0,
         fault_seed: int = 13,
+        real_search_tools: bool = False,
+        rapid_api_key: Optional[str] = None,
+        user_api_key: Optional[str] = None,
+        user_base_url: Optional[str] = None,
     ) -> None:
         self.llm = llm
         self.python_executable = python_executable
@@ -71,6 +75,10 @@ class ToolSandboxRunner:
             python_executable=python_executable,
             official_root=official_root,
             inference_fn=make_inference_fn(llm),
+            real_search_tools=real_search_tools,
+            rapid_api_key=rapid_api_key,
+            user_api_key=user_api_key,
+            user_base_url=user_base_url,
         )
 
     def run_episode(self, episode: Episode) -> RunResult:

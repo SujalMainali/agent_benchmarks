@@ -60,6 +60,10 @@ class ToolSandboxSettings:
     max_tool_steps: int
     fault_rate: float
     fault_seed: int
+    user_api_key: str | None
+    user_base_url: str | None
+    real_search_tools: bool
+    rapid_api_key: str | None
 
 
 def load_toolsandbox_settings() -> ToolSandboxSettings:
@@ -86,6 +90,21 @@ def load_toolsandbox_settings() -> ToolSandboxSettings:
     - TOOLSANDBOX_FAULT_RATE: Probability [0,1] that a tool call is answered
       with a synthetic transient error instead of executing (recovery testing).
     - TOOLSANDBOX_FAULT_SEED: RNG seed for reproducible fault injection.
+    - TOOLSANDBOX_USER_API_KEY: API key for the official GPT user simulator
+      (TOOLSANDBOX_USER_MODE=gpt-4o|gpt-4|gpt-3.5). Kept separate from the
+      project-level OPENAI_API_KEY (local Ollama placeholder), which will not
+      authenticate against a real endpoint.
+    - TOOLSANDBOX_USER_BASE_URL: Optional OpenAI-compatible endpoint for the
+      user simulator (DeepSeek, LiteLLM, vLLM, ...). Defaults to
+      https://api.openai.com/v1. NOTE: the official simulator classes pin
+      concrete model names (e.g. gpt-4o-2024-05-13), so a custom endpoint
+      must serve or alias the pinned name.
+    - TOOLSANDBOX_REAL_SEARCH_TOOLS: If true, RapidAPI-backed search tools
+      (search_lat_lon, search_weather_around_lat_lon, search_stock, ...)
+      execute real web requests; requires RAPID_API_KEY. If false (default),
+      the worker installs deterministic offline simulations of those tools.
+    - RAPID_API_KEY: RapidAPI key, forwarded to the worker only when
+      TOOLSANDBOX_REAL_SEARCH_TOOLS=true.
     """
 
     max_scenarios = _get_int("TOOLSANDBOX_MAX_SCENARIOS", "0")
@@ -106,4 +125,8 @@ def load_toolsandbox_settings() -> ToolSandboxSettings:
         max_tool_steps=_get_int("TOOLSANDBOX_MAX_TOOL_STEPS", "8"),
         fault_rate=_get_float("TOOLSANDBOX_FAULT_RATE", "0.0"),
         fault_seed=_get_int("TOOLSANDBOX_FAULT_SEED", "13"),
+        user_api_key=_get_str("TOOLSANDBOX_USER_API_KEY", "") or None,
+        user_base_url=_get_str("TOOLSANDBOX_USER_BASE_URL", "") or None,
+        real_search_tools=_get_bool("TOOLSANDBOX_REAL_SEARCH_TOOLS", "false"),
+        rapid_api_key=_get_str("RAPID_API_KEY", "") or None,
     )

@@ -119,13 +119,20 @@ class LongMemEvalEvaluator(EvaluatorBase):
         metric_model: str,
         official_root: str,
         output_dir: str,
+        judge_api_key: str | None = None,
+        judge_base_url: str | None = None,
     ) -> List[EvaluationResult]:
         """Score a batch with the official ``evaluate_qa.py`` LLM judge."""
         hyp = write_hypotheses_jsonl(
             run_results, str(Path(output_dir) / "hypotheses.jsonl")
         )
         result_file = run_official_evaluation(
-            hyp, ref_file, metric_model, official_root
+            hyp,
+            ref_file,
+            metric_model,
+            official_root,
+            judge_api_key=judge_api_key,
+            judge_base_url=judge_base_url,
         )
         labels = parse_official_results(result_file)
 

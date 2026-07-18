@@ -40,6 +40,8 @@ class LongMemEvalSettings:
     question_types: list[str] | None
     use_official_eval: bool
     metric_model: str
+    judge_api_key: str | None
+    judge_base_url: str | None
     allow_tools: bool
     max_sessions: int
     full_trajectory: bool
@@ -59,6 +61,15 @@ def load_longmemeval_settings() -> LongMemEvalSettings:
     - LONGMEMEVAL_QUESTION_TYPES: optional comma-separated question_type filter.
     - LONGMEMEVAL_USE_OFFICIAL_EVAL: official judge vs local heuristic.
     - LONGMEMEVAL_METRIC_MODEL: judge model key for evaluate_qa.py.
+    - LONGMEMEVAL_JUDGE_API_KEY: API key the judge subprocess uses. The
+      project-level OPENAI_API_KEY/OPENAI_BASE_URL point at the local agent
+      model (e.g. Ollama), so the judge needs its own key.
+    - LONGMEMEVAL_JUDGE_BASE_URL: optional OpenAI-compatible endpoint for the
+      judge (e.g. a DeepSeek/LiteLLM/vLLM gateway). When set, gpt-* judge
+      requests go there instead of api.openai.com — NOTE the official script
+      still sends its pinned model name (gpt-4o -> gpt-4o-2024-08-06), so the
+      endpoint must serve/alias that name. When unset, gpt-* judges hit the
+      real OpenAI API (the bridge strips the local OPENAI_BASE_URL).
     - LONGMEMEVAL_ALLOW_TOOLS: passed to the agent (memory QA needs no tools).
     - LONGMEMEVAL_MAX_SESSIONS: DEBUG-ONLY cap on replayed sessions; `0` = all.
     - LONGMEMEVAL_FULL_TRAJECTORY: if false, per-sample reports truncate replay.
@@ -84,6 +95,8 @@ def load_longmemeval_settings() -> LongMemEvalSettings:
         question_types=question_types,
         use_official_eval=_get_bool("LONGMEMEVAL_USE_OFFICIAL_EVAL", "true"),
         metric_model=_get_str("LONGMEMEVAL_METRIC_MODEL", "gpt-4o"),
+        judge_api_key=_get_str("LONGMEMEVAL_JUDGE_API_KEY", "") or None,
+        judge_base_url=_get_str("LONGMEMEVAL_JUDGE_BASE_URL", "") or None,
         allow_tools=_get_bool("LONGMEMEVAL_ALLOW_TOOLS", "false"),
         max_sessions=_get_int("LONGMEMEVAL_MAX_SESSIONS", "0"),
         full_trajectory=_get_bool("LONGMEMEVAL_FULL_TRAJECTORY", "false"),
