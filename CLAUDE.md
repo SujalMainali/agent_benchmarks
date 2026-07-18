@@ -14,22 +14,6 @@ Only fall back to Grep/Glob for content the graph doesn't hold (string
 literals, config values, comments). Re-run `index_repository` after large
 refactors to keep the graph fresh.
 
-## Active work — BFCL integration
-
-An in-progress task integrates the official BFCL benchmark into
-`benchmarks/bfcl/`. Progress, design decisions, and remaining steps are
-tracked in [checkpoint.md](checkpoint.md); vendored-repo analysis notes are
-in [BFCL.md](BFCL.md). Read both before touching `benchmarks/bfcl/`.
-
-## Environments (important — two interpreters)
-
-- **Main interpreter:** `./AgentEnv/bin/python` — research-helper deps
-  (langchain, src/, benchmarks/ main-process code). Use this for
-  `py_compile`, tests, and `python -m benchmarks.<name>.run`.
-- **Isolated ToolSandbox interpreter:** `./ToolSandboxEnv/bin/python` —
-  pinned to polars 0.20 / numpy 1.26, incompatible with AgentEnv.
-
-Now, making use of the codebase memory. Figure out how we can properly make the toolsandbox benchmark run on our agent through its runtime.py and common interface rather than the official agent of toolSanbox.
-
-May be using simulated tools which only appear to change the environment and exert the intended effect and return response to agent rather than running actual tool, some failures from time to time so that agent can be evaluated on recovery from failure.
+## Existing Contracts
+The AgentInterface.md contains the contracts between agent runtime interface and benchmarks
 
