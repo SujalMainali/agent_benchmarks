@@ -1,13 +1,21 @@
 # Agent Interface Contract (`AgentRuntime`)
 
-How to plug **any agent** into this repo's benchmarks (LoCoMo, BFCL,
-ToolSandbox). The benchmarks never talk to an agent directly — they talk to an
-**`AgentRuntime`** wrapper. If your agent's runtime honors the contract below,
-all three benchmarks can drive and score it.
+How to plug **any agent** into this repo's benchmarks (LoCoMo, LongMemEval,
+BFCL, ToolSandbox). The benchmarks never talk to an agent directly — they talk
+to an **`AgentRuntime`** wrapper. If your agent's runtime honors the contract
+below, all benchmarks can drive and score it.
+
+> **Construction is handled separately — see [DriverInterface.md](DriverInterface.md).**
+> Benchmarks obtain runtimes through an `AgentDriver`
+> (`create_runtime(RuntimeSpec) -> AgentRuntime`), selected via the
+> `AGENT_DRIVER` env var. To benchmark a new agent: leave the agent untouched,
+> write one driver class, point `AGENT_DRIVER` at it. This document specifies
+> the *behavior* the returned runtime must honor.
 
 - Abstract interface: [benchmarks/common/interfaces.py](benchmarks/common/interfaces.py) (`AgentRuntime`, line 121)
+- Driver interface: [benchmarks/common/driver.py](benchmarks/common/driver.py) (`AgentDriver`, `RuntimeSpec`)
 - Shared data models: [benchmarks/common/models.py](benchmarks/common/models.py)
-- Reference implementation: [src/runtime.py](src/runtime.py) (`ResearchHelperAgentRuntime`)
+- Reference implementation: [src/runtime.py](src/runtime.py) (`ResearchHelperAgentRuntime`), built by [drivers/research_helper.py](drivers/research_helper.py)
 
 ```
 Benchmark loader ─▶ Episode ─▶ adapter (system prompt / tools / context)
@@ -171,42 +179,32 @@ The tool result string may be:
 
 ## 3. How each benchmark constructs the runtime
 
-The ABC covers behavior; construction is per-benchmark. Today all three
-instantiate the concrete classes directly, so a new agent needs either
-(a) a drop-in agent class matching `ResearchHelperAgent`'s constructor, or
-(b) small edits at these three seams:
+Construction is uniform now: every benchmark calls
+`driver.create_runtime(RuntimeSpec(...))` on the driver resolved from
+`AGENT_DRIVER` (see [DriverInterface.md](DriverInterface.md)). What differs is
+the **binding** each benchmark requests and how often it asks:
 
-| Benchmark | Construction site | Shape |
+| Benchmark | Frequency | RuntimeSpec shape |
 |---|---|---|
-| LoCoMo | [benchmarks/locomo/runner.py](benchmarks/locomo/runner.py:20) | `LoCoMoRunner(agent_or_runtime)` — accepts an already-built `AgentRuntime` directly. **Easiest entry point: pass your own runtime.** |
-| BFCL | [benchmarks/bfcl/runner.py](benchmarks/bfcl/runner.py:92) `_build_runtime` | `runtime_factory(system_prompt: str, tools: List[StructuredTool]) -> AgentRuntime` — a fresh runtime per entry. Swap the factory to return yours. |
-| ToolSandbox | [benchmarks/toolsandbox/runtime_bridge.py](benchmarks/toolsandbox/runtime_bridge.py) `ToolSandboxRuntimeSession.agent_turn_fn` | Builds the agent lazily on the first worker turn with `(llm, tools, max_tool_steps, system_prompt_override, allow_tools=True)`, wraps it in the runtime, `reset()`s with prior context, then calls `act()` once per user turn. Replace the two constructor calls to plug a different agent. |
+| LoCoMo | once per run ([benchmarks/locomo/runner.py](benchmarks/locomo/runner.py)) | `benchmark="locomo"`, prompt-mode system prompt, `tools=None` (agent's own tools) |
+| LongMemEval | once per run ([benchmarks/longmemeval/runner.py](benchmarks/longmemeval/runner.py)) | `benchmark="longmemeval"`, LongMemEval system prompt, `tools=None`, `allow_tools` from config |
+| BFCL | fresh per entry ([benchmarks/bfcl/runner.py](benchmarks/bfcl/runner.py) `_build_runtime`) | `benchmark="bfcl"`, category system prompt, `tools=<entry's functions>` |
+| ToolSandbox | fresh per scenario, lazily on first worker turn ([benchmarks/toolsandbox/runtime_bridge.py](benchmarks/toolsandbox/runtime_bridge.py)) | `benchmark="tool_sandbox"`, scenario system prompt, `tools=<sandbox proxy tools>` |
 
-To stay drop-in compatible with all three **without editing benchmark code**,
-your agent class should accept this constructor (the shape the factories use):
+The LoCoMo/LongMemEval runners also still accept a prebuilt `AgentRuntime`
+directly (duck-typed on `reset`/`act`) for tests and ad-hoc use.
 
-```python
-YourAgent(
-    llm,                          # src.llm.LLMProvider (provider-agnostic)
-    tools,                        # Sequence[StructuredTool]
-    max_tool_steps: int = ...,    # tool-loop budget per turn
-    system_prompt_override: str | None = None,  # MUST replace your default system prompt
-    allow_tools: bool = True,
-)
-```
-
-and your runtime should accept `YourRuntime(agent)`.
-
-`system_prompt_override` is load-bearing: benchmarks build scenario-specific
+`spec.system_prompt` is load-bearing: benchmarks build scenario-specific
 system prompts (ToolSandbox scenario instructions, BFCL category prompts) and
 your agent must actually use the override, not merely store it.
 
-The `llm` object is a `src.llm.base.LLMProvider`:
-`invoke(messages, tools=None, response_format=None) -> LLMResponse`, where
-`LLMResponse` has `.text: str`, `.tool_calls: List[ToolCall(name, arguments, id)]`,
-`.message` (the underlying langchain `AIMessage`). If your agent brings its own
-LLM client you can ignore the passed provider — but you lose the project-level
-model configuration (`LLM_PROVIDER`, `OPENAI_MODEL_ID`, … in `.env`).
+Your driver may build the agent's LLM however it likes. The reference driver
+uses the project-level provider factory (`src.llm.build_provider`, configured
+by `LLM_PROVIDER`, `OPENAI_MODEL_ID`, … in `.env`); an external agent's driver
+can bring its own client. One extra: ToolSandbox's `llm_proxy` agent mode
+(official baseline agent, not your runtime) needs a bare LLM — a driver used
+in that mode must expose an `llm` attribute with
+`invoke(messages, tools=None) -> response(.text, .tool_calls)`.
 
 ---
 

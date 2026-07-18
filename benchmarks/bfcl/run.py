@@ -19,9 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import load_settings
-from src.llm import build_provider
-
+from benchmarks.common.driver import resolve_driver
 from benchmarks.bfcl.config import BFCLSettings, load_bfcl_settings
 from benchmarks.bfcl.official import bootstrap_official
 
@@ -96,20 +94,18 @@ def main() -> None:
         sys.exit(1)
     print(f"Loaded {len(episodes)} test entries.")
 
-    # Build the LLM through the provider factory (never a raw SDK).
-    print("Setting up agent LLM provider...")
-    agent_settings = load_settings()
-    llm = build_provider(agent_settings)
+    # Resolve the agent driver (AGENT_DRIVER env var; see DriverInterface.md).
+    print("Setting up agent driver...")
+    driver = resolve_driver()
 
     # Standardized immutable run layout (see ResultFormat.md). Raw artifacts
     # are written ACTIVELY as each entry finishes.
     reporter = BFCLReporter(
         results_root=settings.output_dir,
         dataset=",".join(settings.test_categories),
+        agent_name=getattr(driver, "name", None),
         run_metadata={
-            "llm_provider": getattr(agent_settings, "llm_provider", None),
-            "model_id": getattr(agent_settings, "model_id", None),
-            "temperature": getattr(agent_settings, "temperature", None),
+            **driver.describe(),
             "checker_model_name": settings.checker_model_name,
             "max_tool_steps": settings.max_tool_steps,
             "resolved_categories": categories,
@@ -117,7 +113,7 @@ def main() -> None:
     )
 
     # Run.
-    runner = BFCLRunner(llm=llm, max_tool_steps=settings.max_tool_steps)
+    runner = BFCLRunner(driver, max_tool_steps=settings.max_tool_steps)
     run_results = runner.run_batch(
         episodes, verbose=settings.verbose, on_result=reporter.writer.write_raw
     )

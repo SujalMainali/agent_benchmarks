@@ -5,4 +5,5 @@ data/notes/*
 data/locomo/*
 results/*
 third_party/*
+Agents/*
 __pycache__

@@ -11,14 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.agent import ResearchHelperAgent
-from src.config import load_settings
-from src.llm import build_provider
-from src.tools.web_search import web_search
-from src.tools.document_search import document_search
-from src.tools.note_lookup import note_lookup
-from src.tools.calculator import calculator
-
+from benchmarks.common.driver import RuntimeSpec, resolve_driver
 from benchmarks.locomo.config import load_locomo_settings
 from benchmarks.locomo.prompts import (
     LOCOMO_EVIDENCE_AWARE_PROMPT,
@@ -43,36 +36,24 @@ def _select_locomo_prompt(prompt_mode: str) -> str:
     return LOCOMO_SYSTEM_PROMPT
 
 
-def setup_agent(settings, benchmark_settings) -> ResearchHelperAgent:
-    """Initialize the ResearchHelperAgent with configured tools.
+def _runtime_spec(benchmark_settings) -> RuntimeSpec:
+    """The runtime binding LoCoMo asks of any agent driver.
 
-    The LLM backend (Hugging Face or OpenAI) is chosen by the provider factory
-    from config; this benchmark wiring never imports a provider SDK directly.
+    ``tools=None`` means the agent may bring its own toolset — LoCoMo
+    supplies no benchmark tools of its own.
     """
-    llm = build_provider(settings)
-
-    tools = [
-        calculator,
-        document_search,
-        note_lookup,
-        web_search,
-    ]
-
-    return ResearchHelperAgent(
-        llm=llm,
-        tools=tools,
-        max_tool_steps=settings.max_tool_steps,
-        system_prompt_override=_select_locomo_prompt(benchmark_settings.prompt_mode),
+    return RuntimeSpec(
+        benchmark="locomo",
+        system_prompt=_select_locomo_prompt(benchmark_settings.prompt_mode),
+        tools=None,
         allow_tools=benchmark_settings.allow_tools,
     )
 
 
-def _run_metadata(settings, benchmark_settings) -> dict:
+def _run_metadata(driver, benchmark_settings) -> dict:
     """Collect run-level provenance recorded in summary.json."""
     return {
-        "llm_provider": getattr(settings, "llm_provider", None),
-        "model_id": getattr(settings, "model_id", None),
-        "temperature": getattr(settings, "temperature", None),
+        **driver.describe(),
         "prompt_mode": benchmark_settings.prompt_mode,
         "use_official_eval": benchmark_settings.use_official_eval,
         "allow_tools": benchmark_settings.allow_tools,
@@ -98,11 +79,10 @@ def run_single_sample(
     if output_dir is None:
         output_dir = "results"
 
-    # Load settings and setup agent
+    # Resolve the agent driver (AGENT_DRIVER env var; see DriverInterface.md).
     print("Setting up agent...")
-    settings = load_settings()
     benchmark_settings = load_locomo_settings()
-    agent = setup_agent(settings, benchmark_settings)
+    driver = resolve_driver()
 
     # Load sample
     print(f"Loading samples from {data_file}...")
@@ -139,14 +119,15 @@ def run_single_sample(
 
     print(f"Running {len(episodes)} QA item(s) for sample: {sample_id or episodes[0].episode_id}")
 
-    runner = LoCoMoRunner(agent)
+    runner = LoCoMoRunner(driver, _runtime_spec(benchmark_settings))
 
     # Standardized immutable run layout (see ResultFormat.md). Raw artifacts
     # for each QA item are flushed to disk the moment it finishes, so a long
     # batch can be inspected sample-by-sample while it is still running.
     reporter = LoCoMoReporter(
         results_root=output_dir,
-        run_metadata=_run_metadata(settings, benchmark_settings),
+        agent_name=getattr(driver, "name", None),
+        run_metadata=_run_metadata(driver, benchmark_settings),
     )
 
     def _flush_raw(run_result, index):
@@ -216,11 +197,10 @@ def run_batch(
     if output_dir is None:
         output_dir = "results"
 
-    # Load settings and setup agent
+    # Resolve the agent driver (AGENT_DRIVER env var; see DriverInterface.md).
     print("Setting up agent...")
-    settings = load_settings()
     benchmark_settings = load_locomo_settings()
-    agent = setup_agent(settings, benchmark_settings)
+    driver = resolve_driver()
 
     # Load samples
     print(f"Loading samples from {data_file}...")
@@ -237,14 +217,15 @@ def run_batch(
     # is still running.
     reporter = LoCoMoReporter(
         results_root=output_dir,
-        run_metadata=_run_metadata(settings, benchmark_settings),
+        agent_name=getattr(driver, "name", None),
+        run_metadata=_run_metadata(driver, benchmark_settings),
     )
 
     def _flush_raw(run_result, index):
         run_result.benchmark_mode = benchmark_settings.prompt_mode
         reporter.writer.write_raw(run_result, index)
 
-    runner = LoCoMoRunner(agent)
+    runner = LoCoMoRunner(driver, _runtime_spec(benchmark_settings))
     run_results = runner.run_batch(episodes, verbose=verbose, on_result=_flush_raw)
 
     # Evaluate

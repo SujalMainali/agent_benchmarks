@@ -1,8 +1,9 @@
 """Main entry point for ToolSandbox benchmark execution.
 
 Parallel to ``benchmarks/locomo/run.py``. Loads settings, resolves scenarios
-from the official ToolSandbox repo, builds the configured LLM provider, runs the
-scenario(s) through the official engine, scores milestones, and writes reports.
+from the official ToolSandbox repo, resolves the agent driver (AGENT_DRIVER),
+runs the scenario(s) through the official engine, scores milestones, and
+writes reports.
 """
 
 from __future__ import annotations
@@ -16,9 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import load_settings
-from src.llm import build_provider
-
+from benchmarks.common.driver import resolve_driver
 from benchmarks.common.models import Episode
 from benchmarks.toolsandbox.config import ToolSandboxSettings, load_toolsandbox_settings
 from benchmarks.toolsandbox.evaluator import ToolSandboxEvaluator
@@ -69,11 +68,10 @@ def _filter_episodes(
     return filtered
 
 
-def _setup_runner(settings: ToolSandboxSettings) -> ToolSandboxRunner:
-    """Build the LLM-backed runner from project + benchmark settings."""
-    llm = build_provider(load_settings())
+def _setup_runner(settings: ToolSandboxSettings, driver) -> ToolSandboxRunner:
+    """Build the driver-backed runner from project + benchmark settings."""
     return ToolSandboxRunner(
-        llm=llm,
+        driver=driver,
         python_executable=settings.toolsandbox_python,
         official_root=settings.official_root,
         user_mode=_resolve_user_mode(settings),
@@ -89,15 +87,13 @@ def _setup_runner(settings: ToolSandboxSettings) -> ToolSandboxRunner:
     )
 
 
-def _make_reporter(settings: ToolSandboxSettings) -> ToolSandboxReporter:
+def _make_reporter(settings: ToolSandboxSettings, driver) -> ToolSandboxReporter:
     """Standardized immutable run layout (see ResultFormat.md)."""
-    agent_settings = load_settings()
     return ToolSandboxReporter(
         results_root=settings.output_dir,
+        agent_name=getattr(driver, "name", None),
         run_metadata={
-            "llm_provider": getattr(agent_settings, "llm_provider", None),
-            "model_id": getattr(agent_settings, "model_id", None),
-            "temperature": getattr(agent_settings, "temperature", None),
+            **driver.describe(),
             "user_mode": _resolve_user_mode(settings),
             "agent_mode": settings.agent_mode,
             "max_turns": settings.max_turns,
@@ -168,8 +164,9 @@ def run_single(settings: ToolSandboxSettings) -> None:
     episodes = episodes[:1]
     print(f"Running scenario: {episodes[0].metadata.get('scenario_name')}")
 
-    runner = _setup_runner(settings)
-    reporter = _make_reporter(settings)
+    driver = resolve_driver()
+    runner = _setup_runner(settings, driver)
+    reporter = _make_reporter(settings, driver)
     run_results = runner.run_batch(
         episodes, verbose=settings.verbose, on_result=reporter.writer.write_raw
     )
@@ -190,8 +187,9 @@ def run_batch(settings: ToolSandboxSettings) -> None:
         episodes = episodes[: settings.max_scenarios]
     print(f"Running {len(episodes)} scenario(s)...")
 
-    runner = _setup_runner(settings)
-    reporter = _make_reporter(settings)
+    driver = resolve_driver()
+    runner = _setup_runner(settings, driver)
+    reporter = _make_reporter(settings, driver)
     run_results = runner.run_batch(
         episodes, verbose=settings.verbose, on_result=reporter.writer.write_raw
     )

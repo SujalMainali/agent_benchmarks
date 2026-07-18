@@ -42,11 +42,11 @@ from .runtime_bridge import ToolSandboxRuntimeSession
 
 
 class ToolSandboxRunner:
-    """Runs ToolSandbox scenarios through the isolated worker + our LLM."""
+    """Runs ToolSandbox scenarios through the isolated worker + a driver."""
 
     def __init__(
         self,
-        llm: Any,
+        driver: Any,
         python_executable: str,
         official_root: str = "third_party/ToolSandbox-official",
         user_mode: str = "scripted",
@@ -61,7 +61,15 @@ class ToolSandboxRunner:
         user_api_key: Optional[str] = None,
         user_base_url: Optional[str] = None,
     ) -> None:
-        self.llm = llm
+        """
+        Args:
+            driver: AgentDriver (see DriverInterface.md). In ``runtime`` mode
+                its ``create_runtime`` is called once per scenario with the
+                sandbox proxy tools. In ``llm_proxy`` mode (official baseline
+                agent around a bare LLM) the driver must expose an ``llm``
+                attribute compatible with ``make_inference_fn``.
+        """
+        self.driver = driver
         self.python_executable = python_executable
         self.official_root = official_root
         self.user_mode = user_mode
@@ -71,10 +79,21 @@ class ToolSandboxRunner:
         self.max_tool_steps = max_tool_steps
         self.fault_rate = fault_rate
         self.fault_seed = fault_seed
+
+        # llm_proxy mode services the official agent's raw completions and
+        # needs a bare LLM; runtime mode never touches it.
+        inference_llm = getattr(driver, "llm", None)
+        if agent_mode == "llm_proxy" and inference_llm is None:
+            raise ValueError(
+                "agent_mode='llm_proxy' requires the driver to expose an "
+                "'llm' attribute (see DriverInterface.md)."
+            )
         self.client = ToolSandboxClient(
             python_executable=python_executable,
             official_root=official_root,
-            inference_fn=make_inference_fn(llm),
+            inference_fn=(
+                make_inference_fn(inference_llm) if inference_llm is not None else None
+            ),
             real_search_tools=real_search_tools,
             rapid_api_key=rapid_api_key,
             user_api_key=user_api_key,
@@ -88,12 +107,12 @@ class ToolSandboxRunner:
         agent_input = self.adapter.build_agent_input(episode)
         system_prompt = agent_input["system_prompt"]
 
-        # In runtime mode, our agent (ResearchHelperAgentRuntime) drives the
-        # whole turn; the client tunnels each of its tool calls to the worker.
+        # In runtime mode, the driver-built runtime drives the whole turn;
+        # the client tunnels each of its tool calls to the worker.
         session = None
         if self.agent_mode == "runtime":
             session = ToolSandboxRuntimeSession(
-                llm=self.llm,
+                driver=self.driver,
                 system_prompt=system_prompt,
                 max_tool_steps=self.max_tool_steps,
                 episode=episode,

@@ -22,6 +22,7 @@ class ResearchHelperAgentRuntime(AgentRuntime):
         self._raw_messages: List[Dict[str, Any]] = []
         self._last_action: Action | None = None
         self._last_observation: Observation | None = None
+        self._turn_count = 0
 
     def reset(self, episode: Episode, initial_state: EnvironmentState) -> None:
         self._episode = episode
@@ -29,6 +30,7 @@ class ResearchHelperAgentRuntime(AgentRuntime):
         self._raw_messages = []
         self._last_action = None
         self._last_observation = None
+        self._turn_count = 0
 
         self.agent.memory = TemporaryMemory()
         for message in initial_state.messages:
@@ -45,17 +47,25 @@ class ResearchHelperAgentRuntime(AgentRuntime):
             }
         )
 
-        turn_index = len(self._trajectory.events) + 1
+        # One act() == one turn (an act may emit several events: user/model/
+        # tools/final/done — they all share this turn number).
+        self._turn_count += 1
+        turn_index = self._turn_count
         collected_answer = ""
 
         for update in self.agent.stream_turn_updates(observation.text):
             step_name = str(update.get("step", "event"))
             event_messages = update.get("messages", [])
+            is_user_step = step_name == "user"
             event = TrajectoryEvent(
                 event_type=step_name,
                 turn_number=turn_index,
-                user_input=observation.text if step_name == "user" else "",
-                agent_message=self._first_message_text(event_messages),
+                # The "user" step's message is the user's own text — record it
+                # only as user_input, never as agent_message.
+                user_input=observation.text if is_user_step else "",
+                agent_message="" if is_user_step else self._first_message_text(event_messages),
+                actor="user" if is_user_step else ("tool" if step_name == "tools" else "agent"),
+                recipient="agent" if is_user_step or step_name == "tools" else "user",
                 tool_calls=self._tool_events_from_update(update),
                 metadata={k: v for k, v in update.items() if k not in {"messages", "tool_calls", "answer"}},
             )

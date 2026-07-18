@@ -26,6 +26,7 @@ from .interfaces import (
     BenchmarkReporter,
 )
 from .logger import BenchmarkLogger
+from .driver import AgentDriver, RuntimeSpec, register_driver, resolve_driver
 from .evaluator_base import EvaluatorBase
 from .report_writer import ReportWriter
 from .result_writer import (
@@ -37,6 +38,7 @@ from .base_reporter import StandardReporter
 
 __all__ = [
     "Action",
+    "AgentDriver",
     "AgentRuntime",
     "BenchmarkAdapter",
     "BenchmarkEnvironment",
@@ -55,6 +57,7 @@ __all__ = [
     "Observation",
     "ReportWriter",
     "RunResult",
+    "RuntimeSpec",
     "StandardReporter",
     "Task",
     "ToolEvent",
@@ -63,4 +66,6 @@ __all__ = [
     "TrajectoryStep",
     "resolve_agent_name",
     "resolve_memory_architecture",
+    "register_driver",
+    "resolve_driver",
 ]

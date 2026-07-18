@@ -63,8 +63,20 @@ def resolve_memory_architecture() -> str:
 
 
 def resolve_agent_name(default: str = "research_helper") -> str:
-    """Human-facing agent label recorded in the experiment index."""
-    return (os.getenv("AGENT_NAME", "").split("#", 1)[0].strip() or default)
+    """Human-facing agent label recorded in the experiment index.
+
+    Precedence: explicit ``AGENT_NAME`` env var, then the ``AGENT_DRIVER``
+    selection (registry key, or class name of a raw import path), then the
+    default. Callers that hold a resolved driver should pass
+    ``agent_name=driver.name`` instead of relying on this fallback.
+    """
+    explicit = os.getenv("AGENT_NAME", "").split("#", 1)[0].strip()
+    if explicit:
+        return explicit
+    driver_key = os.getenv("AGENT_DRIVER", "").split("#", 1)[0].strip()
+    if driver_key:
+        return driver_key.rsplit(":", 1)[-1] if ":" in driver_key else driver_key
+    return default
 
 
 def _as_serializable(value: Any) -> Any:

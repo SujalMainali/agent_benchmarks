@@ -14,14 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.agent import ResearchHelperAgent
-from src.config import load_settings
-from src.llm import build_provider
-from src.tools.web_search import web_search
-from src.tools.document_search import document_search
-from src.tools.note_lookup import note_lookup
-from src.tools.calculator import calculator
-
+from benchmarks.common.driver import RuntimeSpec, resolve_driver
 from benchmarks.longmemeval.adapter import LongMemEvalAdapter
 from benchmarks.longmemeval.config import LongMemEvalSettings, load_longmemeval_settings
 from benchmarks.longmemeval.evaluator import LongMemEvalEvaluator
@@ -31,25 +24,20 @@ from benchmarks.longmemeval.report import LongMemEvalReporter
 from benchmarks.longmemeval.runner import LongMemEvalRunner
 
 
-def setup_agent(settings, bench: LongMemEvalSettings) -> ResearchHelperAgent:
-    """Build the ResearchHelperAgent with the LongMemEval system prompt."""
-    llm = build_provider(settings)
-    tools = [calculator, document_search, note_lookup, web_search]
-    return ResearchHelperAgent(
-        llm=llm,
-        tools=tools,
-        max_tool_steps=settings.max_tool_steps,
-        system_prompt_override=LONGMEMEVAL_SYSTEM_PROMPT,
+def _runtime_spec(bench: LongMemEvalSettings) -> RuntimeSpec:
+    """The runtime binding LongMemEval asks of any agent driver."""
+    return RuntimeSpec(
+        benchmark="longmemeval",
+        system_prompt=LONGMEMEVAL_SYSTEM_PROMPT,
+        tools=None,
         allow_tools=bench.allow_tools,
     )
 
 
-def _run_metadata(settings, bench: LongMemEvalSettings) -> dict:
+def _run_metadata(driver, bench: LongMemEvalSettings) -> dict:
     """Run-level provenance recorded in summary.json."""
     return {
-        "llm_provider": getattr(settings, "llm_provider", None),
-        "model_id": getattr(settings, "model_id", None),
-        "temperature": getattr(settings, "temperature", None),
+        **driver.describe(),
         "use_official_eval": bench.use_official_eval,
         "metric_model": bench.metric_model,
         "max_sessions": bench.max_sessions,
@@ -58,11 +46,12 @@ def _run_metadata(settings, bench: LongMemEvalSettings) -> dict:
     }
 
 
-def _make_reporter(settings, bench: LongMemEvalSettings) -> LongMemEvalReporter:
+def _make_reporter(driver, bench: LongMemEvalSettings) -> LongMemEvalReporter:
     return LongMemEvalReporter(
         results_root=bench.output_dir,
         full_trajectory=bench.full_trajectory,
-        run_metadata=_run_metadata(settings, bench),
+        agent_name=getattr(driver, "name", None),
+        run_metadata=_run_metadata(driver, bench),
     )
 
 
@@ -92,8 +81,7 @@ def _evaluate(
 
 def run_single(bench: LongMemEvalSettings) -> None:
     print("Setting up agent...")
-    settings = load_settings()
-    agent = setup_agent(settings, bench)
+    driver = resolve_driver()
 
     print(f"Loading episode from {bench.data_file}...")
     loader = LongMemEvalLoader()
@@ -110,7 +98,11 @@ def run_single(bench: LongMemEvalSettings) -> None:
         return
 
     runner = LongMemEvalRunner(
-        agent, LongMemEvalAdapter(), max_sessions=bench.max_sessions, verbose=bench.verbose
+        driver,
+        LongMemEvalAdapter(),
+        max_sessions=bench.max_sessions,
+        verbose=bench.verbose,
+        spec=_runtime_spec(bench),
     )
     episode = episodes[0]
     print(f"Running question {episode.episode_id} ({episode.metadata['num_sessions']} sessions)...")
@@ -118,7 +110,7 @@ def run_single(bench: LongMemEvalSettings) -> None:
     # Standardized immutable run layout (see ResultFormat.md). The trajectory
     # is streamed to disk incrementally as each session replays, so the raw
     # artifact grows live rather than appearing only when the episode finishes.
-    reporter = _make_reporter(settings, bench)
+    reporter = _make_reporter(driver, bench)
     reporter.writer.open_stream(runner._provisional_result(episode), 0)
     run_result = runner.run_episode(
         episode,
@@ -150,8 +142,7 @@ def run_single(bench: LongMemEvalSettings) -> None:
 
 def run_batch(bench: LongMemEvalSettings) -> None:
     print("Setting up agent...")
-    settings = load_settings()
-    agent = setup_agent(settings, bench)
+    driver = resolve_driver()
 
     loader = LongMemEvalLoader()
     episodes_iter = loader.iter_episodes(
@@ -161,12 +152,16 @@ def run_batch(bench: LongMemEvalSettings) -> None:
     )
 
     runner = LongMemEvalRunner(
-        agent, LongMemEvalAdapter(), max_sessions=bench.max_sessions, verbose=bench.verbose
+        driver,
+        LongMemEvalAdapter(),
+        max_sessions=bench.max_sessions,
+        verbose=bench.verbose,
+        spec=_runtime_spec(bench),
     )
 
     # Standardized immutable run layout (see ResultFormat.md). Raw artifacts
     # are written ACTIVELY as each streamed episode finishes.
-    reporter = _make_reporter(settings, bench)
+    reporter = _make_reporter(driver, bench)
 
     print("Running batch (streaming)...")
     run_results = runner.run_batch(

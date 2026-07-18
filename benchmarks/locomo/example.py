@@ -17,12 +17,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.agent import ResearchHelperAgent
-from src.config import load_settings
-from src.tools.web_search import web_search
-from src.tools.document_search import document_search
-from src.tools.note_lookup import note_lookup
-from src.tools.calculator import calculator
 from benchmarks.locomo.config import load_locomo_settings
 from benchmarks.locomo.loader import LoCoMoLoader
 from benchmarks.locomo.adapter import LoCoMoAdapter

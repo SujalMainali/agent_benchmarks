@@ -3,31 +3,40 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
+from benchmarks.common.driver import RuntimeSpec
 from benchmarks.common.logger import BenchmarkLogger
 from benchmarks.common.models import Action, BenchmarkSample, Episode, RunResult, TrajectoryEvent
 from benchmarks.locomo.environment import LoCoMoEnvironment
-from src.runtime import ResearchHelperAgentRuntime
-
-if TYPE_CHECKING:
-    from src.agent import ResearchHelperAgent
 
 
 class LoCoMoRunner:
-    """Runs LoCoMo samples through the ResearchHelperAgent."""
+    """Runs LoCoMo samples through any AgentRuntime (see AgentInterface.md)."""
 
-    def __init__(self, agent: ResearchHelperAgent | ResearchHelperAgentRuntime) -> None:
+    def __init__(self, runtime_or_driver: Any, spec: Optional[RuntimeSpec] = None) -> None:
         """
         Initialize the runner.
 
         Args:
-            agent: ResearchHelperAgent instance to use for inference.
+            runtime_or_driver: either a prebuilt ``AgentRuntime`` (anything
+                duck-typed with ``reset``/``act``), or an ``AgentDriver``
+                whose ``create_runtime`` will be called once with ``spec``.
+            spec: the RuntimeSpec used when a driver is given. Defaults to a
+                bare ``RuntimeSpec(benchmark="locomo")``.
         """
-        if isinstance(agent, ResearchHelperAgentRuntime):
-            self.runtime = agent
+        if hasattr(runtime_or_driver, "create_runtime"):
+            self.runtime = runtime_or_driver.create_runtime(
+                spec or RuntimeSpec(benchmark="locomo")
+            )
+        elif hasattr(runtime_or_driver, "act"):
+            self.runtime = runtime_or_driver
         else:
-            self.runtime = ResearchHelperAgentRuntime(agent)
+            raise TypeError(
+                "LoCoMoRunner needs an AgentRuntime (reset/act) or an "
+                "AgentDriver (create_runtime); got "
+                f"{type(runtime_or_driver).__name__}. See DriverInterface.md."
+            )
         self.environment = LoCoMoEnvironment()
 
     def run_sample(self, sample: BenchmarkSample | Episode, log: Optional[BenchmarkLogger] = None) -> RunResult:

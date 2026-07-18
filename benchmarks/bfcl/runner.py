@@ -1,42 +1,42 @@
 """BFCL runner — orchestrates episode -> adapter -> runtime -> bridge -> RunResult.
 
-Mirrors the LoCoMo/ToolSandbox runner role. The runner owns the LLM provider
-and builds one fresh agent + runtime per episode (each entry advertises its
-own tool set), then delegates execution to the runtime bridge. It never talks
-to the model directly and contains no evaluation logic.
+Mirrors the LoCoMo/ToolSandbox runner role. The runner holds an AgentDriver
+and asks it for one fresh runtime per episode (each entry advertises its own
+tool set), then delegates execution to the runtime bridge. It never talks to
+the model directly and contains no evaluation logic.
 """
 
 from __future__ import annotations
 
 from typing import Any, List, Optional
 
+from benchmarks.common.driver import RuntimeSpec
+from benchmarks.common.interfaces import AgentRuntime
 from benchmarks.common.models import Episode, RunResult
-
-from src.agent import ResearchHelperAgent
-from src.runtime import ResearchHelperAgentRuntime
 
 from .adapter import BFCLAdapter
 from .runtime_bridge import BFCLRuntimeBridge
 
 
 class BFCLRunner:
-    """Runs BFCL episodes through the shared agent runtime."""
+    """Runs BFCL episodes through driver-built runtimes."""
 
     def __init__(
         self,
-        llm: Any,
+        driver: Any,
         max_tool_steps: int = 1,
         adapter: Optional[BFCLAdapter] = None,
     ) -> None:
         """
         Args:
-            llm: LLMProvider built by the provider factory (never a raw SDK).
+            driver: AgentDriver whose ``create_runtime`` is called once per
+                entry with that entry's system prompt and tool set.
             max_tool_steps: Agent tool-loop budget per entry. BFCL single-turn
                 entries are scored on the first tool-calling response, so 1 is
                 the faithful setting.
             adapter: Input transformation layer (defaults to BFCLAdapter).
         """
-        self.llm = llm
+        self.driver = driver
         self.max_tool_steps = max_tool_steps
         self.adapter = adapter or BFCLAdapter()
         self.bridge = BFCLRuntimeBridge(
@@ -105,18 +105,18 @@ class BFCLRunner:
 
     def _build_runtime(
         self, system_prompt: str, tools: List[Any]
-    ) -> ResearchHelperAgentRuntime:
-        """Fresh agent + runtime bound to one entry's tools and system prompt.
+    ) -> AgentRuntime:
+        """Fresh runtime bound to one entry's tools and system prompt.
 
-        Uses the agent's normal tool-list initialization so the entry's
-        functions are advertised through the same binding path as any other
-        run (Phase 4 requirement).
+        The driver decides how the agent is constructed; BFCL only specifies
+        the binding (entry-specific tools + category system prompt).
         """
-        agent = ResearchHelperAgent(
-            llm=self.llm,
-            tools=tools,
-            max_tool_steps=self.max_tool_steps,
-            system_prompt_override=system_prompt or None,
-            allow_tools=True,
+        return self.driver.create_runtime(
+            RuntimeSpec(
+                benchmark="bfcl",
+                system_prompt=system_prompt or None,
+                tools=tools,
+                allow_tools=True,
+                max_tool_steps=self.max_tool_steps,
+            )
         )
-        return ResearchHelperAgentRuntime(agent)

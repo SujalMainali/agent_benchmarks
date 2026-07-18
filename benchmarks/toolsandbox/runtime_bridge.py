@@ -1,7 +1,7 @@
 """Parent-side glue for ToolSandbox runtime mode.
 
 Runs in the MAIN interpreter. Never imports ``tool_sandbox``. Bridges the
-worker's ``agent_turn_request`` protocol to our ``ResearchHelperAgentRuntime``:
+worker's ``agent_turn_request`` protocol to a driver-built ``AgentRuntime``:
 
 * ``WorkerToolProxy`` implements the shared ``ToolExecutionEnvironment``
   interface (its first concrete implementation). Each ``execute`` call tunnels
@@ -30,16 +30,14 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import StructuredTool
 
-from benchmarks.common.interfaces import ToolExecutionEnvironment
+from benchmarks.common.driver import RuntimeSpec
+from benchmarks.common.interfaces import AgentRuntime, ToolExecutionEnvironment
 from benchmarks.common.models import (
     Action,
     EnvironmentState,
     Episode,
     Observation,
 )
-
-from src.agent import ResearchHelperAgent
-from src.runtime import ResearchHelperAgentRuntime
 
 # Callback the client injects per turn: (name, arguments) -> (result, exception, fault).
 ExecuteTool = Callable[[str, Dict[str, Any]], Tuple[str, Optional[str], bool]]
@@ -133,20 +131,20 @@ class ToolSandboxRuntimeSession:
 
     def __init__(
         self,
-        llm: Any,
+        driver: Any,
         system_prompt: str,
         max_tool_steps: int,
         episode: Episode,
     ) -> None:
-        self._llm = llm
+        self._driver = driver
         self._system_prompt = system_prompt
         self._max_tool_steps = max_tool_steps
         self._episode = episode
-        self._runtime: Optional[ResearchHelperAgentRuntime] = None
+        self._runtime: Optional[AgentRuntime] = None
         self.proxy = WorkerToolProxy()
 
     @property
-    def runtime(self) -> Optional[ResearchHelperAgentRuntime]:
+    def runtime(self) -> Optional[AgentRuntime]:
         return self._runtime
 
     def agent_turn_fn(
@@ -158,17 +156,20 @@ class ToolSandboxRuntimeSession:
         """Drive one whole agent turn; return the final answer text."""
         self.proxy.bind(execute_tool)
 
-        # First turn: build the agent + runtime once, seeding prior context.
+        # First turn: build the runtime once via the driver, seeding prior
+        # context. Proxy-tool wrapping stays here — it is sandbox plumbing,
+        # not agent logic.
         if self._runtime is None:
             structured = build_proxy_structured_tools(tools, self.proxy)
-            agent = ResearchHelperAgent(
-                llm=self._llm,
-                tools=structured,
-                max_tool_steps=self._max_tool_steps,
-                system_prompt_override=self._system_prompt or None,
-                allow_tools=True,
+            self._runtime = self._driver.create_runtime(
+                RuntimeSpec(
+                    benchmark="tool_sandbox",
+                    system_prompt=self._system_prompt or None,
+                    tools=structured,
+                    allow_tools=True,
+                    max_tool_steps=self._max_tool_steps,
+                )
             )
-            self._runtime = ResearchHelperAgentRuntime(agent)
             self._runtime.reset(
                 self._episode,
                 EnvironmentState(

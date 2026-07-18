@@ -10,8 +10,9 @@ cleared only by the next ``reset()``.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
+from benchmarks.common.driver import RuntimeSpec
 from benchmarks.common.logger import BenchmarkLogger
 from benchmarks.common.models import (
     Episode,
@@ -20,28 +21,41 @@ from benchmarks.common.models import (
     RunResult,
     TrajectoryEvent,
 )
-from src.runtime import ResearchHelperAgentRuntime
 
 from .adapter import LongMemEvalAdapter
 
-if TYPE_CHECKING:
-    from src.agent import ResearchHelperAgent
-
 
 class LongMemEvalRunner:
-    """Runs LongMemEval episodes through the ResearchHelperAgent runtime."""
+    """Runs LongMemEval episodes through any AgentRuntime."""
 
     def __init__(
         self,
-        agent_or_runtime: "ResearchHelperAgent | ResearchHelperAgentRuntime",
+        runtime_or_driver: Any,
         adapter: LongMemEvalAdapter | None = None,
         max_sessions: int = 0,
         verbose: bool = True,
+        spec: Optional[RuntimeSpec] = None,
     ) -> None:
-        if isinstance(agent_or_runtime, ResearchHelperAgentRuntime):
-            self.runtime = agent_or_runtime
+        """
+        Args:
+            runtime_or_driver: either a prebuilt ``AgentRuntime`` (anything
+                duck-typed with ``reset``/``act``), or an ``AgentDriver``
+                whose ``create_runtime`` will be called once with ``spec``.
+            spec: the RuntimeSpec used when a driver is given. Defaults to a
+                bare ``RuntimeSpec(benchmark="longmemeval")``.
+        """
+        if hasattr(runtime_or_driver, "create_runtime"):
+            self.runtime = runtime_or_driver.create_runtime(
+                spec or RuntimeSpec(benchmark="longmemeval")
+            )
+        elif hasattr(runtime_or_driver, "act"):
+            self.runtime = runtime_or_driver
         else:
-            self.runtime = ResearchHelperAgentRuntime(agent_or_runtime)
+            raise TypeError(
+                "LongMemEvalRunner needs an AgentRuntime (reset/act) or an "
+                "AgentDriver (create_runtime); got "
+                f"{type(runtime_or_driver).__name__}. See DriverInterface.md."
+            )
         self.adapter = adapter or LongMemEvalAdapter()
         self.max_sessions = max_sessions
         self.verbose = verbose
