@@ -140,9 +140,20 @@ def run_single_sample(
     print(f"Running {len(episodes)} QA item(s) for sample: {sample_id or episodes[0].episode_id}")
 
     runner = LoCoMoRunner(agent)
-    run_results = runner.run_batch(episodes, verbose=True)
-    for run_result in run_results:
+
+    # Standardized immutable run layout (see ResultFormat.md). Raw artifacts
+    # for each QA item are flushed to disk the moment it finishes, so a long
+    # batch can be inspected sample-by-sample while it is still running.
+    reporter = LoCoMoReporter(
+        results_root=output_dir,
+        run_metadata=_run_metadata(settings, benchmark_settings),
+    )
+
+    def _flush_raw(run_result, index):
         run_result.benchmark_mode = benchmark_settings.prompt_mode
+        reporter.writer.write_raw(run_result, index)
+
+    run_results = runner.run_batch(episodes, verbose=True, on_result=_flush_raw)
 
     # Evaluate
     evaluator = LoCoMoEvaluator()
@@ -153,12 +164,15 @@ def run_single_sample(
     else:
         eval_results = [evaluator.evaluate(r) for r in run_results]
 
-    # Report (standardized immutable run layout — see ResultFormat.md).
-    reporter = LoCoMoReporter(
-        results_root=output_dir,
-        run_metadata=_run_metadata(settings, benchmark_settings),
-    )
-    run_dir = reporter.write_batch(run_results, eval_results)
+    # Processed case records + batch summary (raw already streamed above).
+    for index, (run_result, eval_result) in enumerate(zip(run_results, eval_results)):
+        reporter.writer.append_case(
+            run_result,
+            eval_result,
+            index,
+            **reporter.case_fields(run_result, eval_result),
+        )
+    run_dir = reporter.finalize(run_results, eval_results)
 
     # Print per-QA-item results
     for episode, run_result, eval_result in zip(episodes, run_results, eval_results):
@@ -218,11 +232,20 @@ def run_batch(
 
     print(f"Running {len(episodes)} samples...")
 
-    # Run batch
-    runner = LoCoMoRunner(agent)
-    run_results = runner.run_batch(episodes, verbose=verbose)
-    for run_result in run_results:
+    # Run batch. Standardized immutable run layout (see ResultFormat.md): raw
+    # artifacts are flushed per-sample so a long batch is inspectable while it
+    # is still running.
+    reporter = LoCoMoReporter(
+        results_root=output_dir,
+        run_metadata=_run_metadata(settings, benchmark_settings),
+    )
+
+    def _flush_raw(run_result, index):
         run_result.benchmark_mode = benchmark_settings.prompt_mode
+        reporter.writer.write_raw(run_result, index)
+
+    runner = LoCoMoRunner(agent)
+    run_results = runner.run_batch(episodes, verbose=verbose, on_result=_flush_raw)
 
     # Evaluate
     print("Evaluating results...")
@@ -234,13 +257,16 @@ def run_batch(
     else:
         eval_results = [evaluator.evaluate(r) for r in run_results]
 
-    # Report (standardized immutable run layout — see ResultFormat.md).
+    # Processed case records + batch summary (raw already streamed above).
     print(f"Writing reports under {output_dir}...")
-    reporter = LoCoMoReporter(
-        results_root=output_dir,
-        run_metadata=_run_metadata(settings, benchmark_settings),
-    )
-    run_dir = reporter.write_batch(run_results, eval_results)
+    for index, (run_result, eval_result) in enumerate(zip(run_results, eval_results)):
+        reporter.writer.append_case(
+            run_result,
+            eval_result,
+            index,
+            **reporter.case_fields(run_result, eval_result),
+        )
+    run_dir = reporter.finalize(run_results, eval_results)
 
     # Print summary
     correct = sum(1 for r in eval_results if r.is_correct)

@@ -115,7 +115,10 @@ class LoCoMoRunner:
             )
 
     def run_batch(
-        self, samples: List[BenchmarkSample | Episode], verbose: bool = True
+        self,
+        samples: List[BenchmarkSample | Episode],
+        verbose: bool = True,
+        on_result: Optional[Any] = None,
     ) -> List[RunResult]:
         """
         Run multiple samples and collect results.
@@ -123,6 +126,9 @@ class LoCoMoRunner:
         Args:
             samples: List of BenchmarkSample objects.
             verbose: Whether to print progress.
+            on_result: Optional ``(run_result, index) -> None`` callback fired
+                as each sample finishes — used to write raw artifacts actively
+                during the run rather than at the end of the batch.
 
         Returns:
             List of RunResult objects.
@@ -134,6 +140,8 @@ class LoCoMoRunner:
 
             result = self.run_sample(sample)
             results.append(result)
+            if on_result is not None:
+                on_result(result, i)
 
         return results
 

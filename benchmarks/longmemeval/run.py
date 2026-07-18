@@ -114,13 +114,17 @@ def run_single(bench: LongMemEvalSettings) -> None:
     )
     episode = episodes[0]
     print(f"Running question {episode.episode_id} ({episode.metadata['num_sessions']} sessions)...")
-    run_result = runner.run_episode(episode)
 
-    # Standardized immutable run layout (see ResultFormat.md). Raw artifacts
-    # are written as soon as the episode finishes; official-judge artifacts
-    # (hypotheses.jsonl etc.) land in the run's raw/logs/ directory.
+    # Standardized immutable run layout (see ResultFormat.md). The trajectory
+    # is streamed to disk incrementally as each session replays, so the raw
+    # artifact grows live rather than appearing only when the episode finishes.
     reporter = _make_reporter(settings, bench)
-    reporter.writer.write_raw(run_result, 0)
+    reporter.writer.open_stream(runner._provisional_result(episode), 0)
+    run_result = runner.run_episode(
+        episode,
+        on_step=lambda events: reporter.writer.stream_events(0, events),
+    )
+    reporter.writer.close_stream(run_result, 0)
 
     evaluator = LongMemEvalEvaluator()
     eval_results = _evaluate(
@@ -168,7 +172,7 @@ def run_batch(bench: LongMemEvalSettings) -> None:
     run_results = runner.run_batch(
         episodes_iter,
         verbose=bench.verbose,
-        on_result=reporter.writer.write_raw,
+        stream_writer=reporter.writer,
     )
     if not run_results:
         print("No episodes ran.")

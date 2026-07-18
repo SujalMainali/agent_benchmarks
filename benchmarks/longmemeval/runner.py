@@ -10,7 +10,7 @@ cleared only by the next ``reset()``.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional
 
 from benchmarks.common.logger import BenchmarkLogger
 from benchmarks.common.models import (
@@ -18,6 +18,7 @@ from benchmarks.common.models import (
     EnvironmentState,
     Observation,
     RunResult,
+    TrajectoryEvent,
 )
 from src.runtime import ResearchHelperAgentRuntime
 
@@ -67,8 +68,21 @@ class LongMemEvalRunner:
         return kept, True
 
     def run_episode(
-        self, episode: Episode, log: Optional[BenchmarkLogger] = None
+        self,
+        episode: Episode,
+        log: Optional[BenchmarkLogger] = None,
+        on_step: Optional[Callable[[List[TrajectoryEvent]], None]] = None,
     ) -> RunResult:
+        """Replay an episode's sessions, then answer its final question.
+
+        Args:
+            on_step: Optional ``(trajectory_events) -> None`` callback fired
+                after every ``act()`` (each replayed session and the final
+                question). Receives the runtime's cumulative trajectory events
+                so the caller can flush the newly-produced tail to disk — this
+                is what makes a long single episode's raw output grow live
+                rather than appearing only when the whole episode finishes.
+        """
         if log is None:
             log = BenchmarkLogger(episode.episode_id)
 
@@ -85,6 +99,13 @@ class LongMemEvalRunner:
             EnvironmentState(episode_id=episode.episode_id, messages=[]),
         )
 
+        def _emit() -> None:
+            if on_step is not None:
+                try:
+                    on_step(self.runtime.get_trajectory().events)
+                except Exception:  # streaming must never break the run
+                    pass
+
         start = time.time()
         replay_turns = 0
 
@@ -99,6 +120,7 @@ class LongMemEvalRunner:
             except Exception as exc:  # a failed replay invalidates memory state
                 error_msg = f"Error replaying session {i + 1}/{total_sessions}: {exc}"
                 return self._error_result(episode, run_metadata, total_sessions, error_msg)
+            _emit()  # flush this session's trajectory events live
             replay_turns += smeta.get("turn_count", 0)
             if self.verbose and (i + 1) % 25 == 0:
                 print(f"  replayed {i + 1}/{total_sessions} sessions")
@@ -118,6 +140,7 @@ class LongMemEvalRunner:
         except Exception as exc:
             error_msg = f"Error answering final question: {exc}"
             return self._error_result(episode, run_metadata, total_sessions, error_msg)
+        _emit()  # flush the final-question trajectory events live
         question_latency_ms = (time.time() - q_start) * 1000
 
         predicted_answer = action.text
@@ -179,6 +202,7 @@ class LongMemEvalRunner:
         episodes_iter: Iterator[Episode],
         verbose: bool | None = None,
         on_result: Optional[Any] = None,
+        stream_writer: Optional[Any] = None,
     ) -> List[RunResult]:
         """Consume an episode ITERATOR (streaming) and collect RunResults.
 
@@ -190,16 +214,51 @@ class LongMemEvalRunner:
             on_result: Optional ``(run_result, index) -> None`` callback fired
                 as each episode finishes — used to write raw artifacts actively
                 during the run rather than at the end of the batch.
+            stream_writer: Optional writer exposing ``open_stream`` /
+                ``stream_events`` / ``close_stream``. When given, each episode's
+                trajectory is streamed to disk INCREMENTALLY as every ``act()``
+                completes (after each replayed session and the final question),
+                so a long episode's raw file grows live. ``close_stream``
+                finalizes the sample, so ``on_result`` should be omitted to
+                avoid a redundant one-shot write.
         """
         show = self.verbose if verbose is None else verbose
         results: List[RunResult] = []
         for i, episode in enumerate(episodes_iter):
             if show:
                 print(f"Running episode {i + 1}: {episode.episode_id}")
-            result = self.run_episode(episode)
+
+            on_step = None
+            if stream_writer is not None:
+                stream_writer.open_stream(self._provisional_result(episode), i)
+                on_step = lambda events, _i=i: stream_writer.stream_events(_i, events)
+
+            result = self.run_episode(episode, on_step=on_step)
             results.append(result)
+
+            if stream_writer is not None:
+                stream_writer.close_stream(result, i)
             if on_result is not None:
                 on_result(result, i)
             if result.episode is not None:
                 result.episode.task.context.pop("haystack_sessions", None)
         return results
+
+    def _provisional_result(self, episode: Episode) -> RunResult:
+        """A skeleton RunResult for a streamed episode's opening header.
+
+        Carries only the identity fields known before the episode runs; the
+        final predicted answer / latency are filled in when ``close_stream``
+        rewrites the header.
+        """
+        return RunResult(
+            sample_id=episode.episode_id,
+            episode_id=episode.episode_id,
+            question=episode.question,
+            predicted_answer="",
+            gold_answer=episode.gold_answer,
+            trajectory=[],
+            benchmark_mode="longmemeval",
+            metadata=dict(episode.metadata),
+            episode=episode,
+        )

@@ -141,6 +141,10 @@ class ExperimentRunWriter:
 
         self._raw_written: set[int] = set()
         self._case_count = 0
+        # Streaming state: index -> number of events already appended live to
+        # that sample's trajectory/tool-call files (see ``open_stream``).
+        self._streamed: Dict[int, int] = {}
+        self._stream_open: set[int] = set()
 
     # -- directory reservation ---------------------------------------------
 
@@ -172,6 +176,14 @@ class ExperimentRunWriter:
         Idempotent per index.
         """
         stem = self.sample_stem(index)
+        if index in self._raw_written:
+            # Already written (e.g. a streamed sample closed via ``close_stream``).
+            # Preserve the existing artifacts rather than clobbering them.
+            return {
+                "trajectory": f"../raw/trajectories/{stem}.jsonl",
+                "tool_calls": f"../raw/tool_calls/{stem}.jsonl",
+                "environment": f"../raw/environments/{stem}.json",
+            }
         events = _events(run_result)
 
         self._write_trajectory_jsonl(run_result, events, stem)
@@ -196,22 +208,145 @@ class ExperimentRunWriter:
             event_dicts = [self._event_dict(event) for event in events]
         with open(path, "w", encoding="utf-8") as f:
             # First line is a header event carrying sample identity + raw msgs.
-            header = {
-                "event_type": "meta",
-                "sample_id": run_result.sample_id,
-                "episode_id": run_result.episode_id or run_result.sample_id,
-                "benchmark": self.benchmark,
-                "benchmark_mode": run_result.benchmark_mode,
-                "question": run_result.question,
-                "gold_answer": run_result.gold_answer,
-                "predicted_answer": run_result.predicted_answer,
-                "total_latency_ms": run_result.total_latency_ms,
-                "error": run_result.error,
-                "raw_messages": run_result.raw_messages if self.include_raw_messages else None,
-            }
-            f.write(json.dumps(header, default=str) + "\n")
+            f.write(json.dumps(self._trajectory_header(run_result), default=str) + "\n")
             for event_dict in event_dicts:
                 f.write(json.dumps(event_dict, default=str) + "\n")
+
+    def _trajectory_header(self, run_result: RunResult) -> Dict[str, Any]:
+        """The ``meta`` first line of a sample's trajectory JSONL file."""
+        return {
+            "event_type": "meta",
+            "sample_id": run_result.sample_id,
+            "episode_id": run_result.episode_id or run_result.sample_id,
+            "benchmark": self.benchmark,
+            "benchmark_mode": run_result.benchmark_mode,
+            "question": run_result.question,
+            "gold_answer": run_result.gold_answer,
+            "predicted_answer": run_result.predicted_answer,
+            "total_latency_ms": run_result.total_latency_ms,
+            "error": run_result.error,
+            "raw_messages": run_result.raw_messages if self.include_raw_messages else None,
+        }
+
+    @staticmethod
+    def _tool_call_records(event: TrajectoryEvent) -> List[Dict[str, Any]]:
+        """Flat per-tool-call records for the tool_calls JSONL file."""
+        return [
+            {
+                "turn_number": event.turn_number,
+                "tool_name": tc.tool_name,
+                "arguments": tc.arguments,
+                "result": tc.result,
+                "latency_ms": tc.latency_ms,
+                "token_count": tc.token_count,
+                "success": event.exception is None,
+                "exception": event.exception,
+            }
+            for tc in event.tool_calls
+        ]
+
+    # -- live intra-sample streaming ---------------------------------------
+
+    def open_stream(self, run_result: RunResult, index: int) -> None:
+        """Begin streaming a sample whose events arrive incrementally.
+
+        Writes a provisional trajectory header immediately so the file exists
+        and is inspectable, then :meth:`stream_events` appends events as the
+        agent produces them (e.g. LongMemEval's per-session replay). Use this
+        instead of :meth:`write_raw` for samples that take a long time to
+        finish — the on-disk artifact grows live rather than appearing only at
+        the end.
+        """
+        stem = self.sample_stem(index)
+        traj_path = os.path.join(self.trajectories_dir, f"{stem}.jsonl")
+        tool_path = os.path.join(self.tool_calls_dir, f"{stem}.jsonl")
+        with open(traj_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(self._trajectory_header(run_result), default=str) + "\n")
+        # Create/truncate the tool-calls file so it exists from the start.
+        open(tool_path, "w", encoding="utf-8").close()
+        self._streamed[index] = 0
+        self._stream_open.add(index)
+
+    def stream_events(self, index: int, events: List[TrajectoryEvent]) -> None:
+        """Append newly-produced trajectory events for an open stream.
+
+        Idempotent w.r.t. already-streamed events: pass the sample's full
+        event list each time and only the unwritten tail is flushed. Bytes are
+        fsync-flushed so a tail-follow sees them promptly.
+        """
+        if index not in self._stream_open:
+            return
+        already = self._streamed.get(index, 0)
+        if len(events) <= already:
+            return
+        new_events = events[already:]
+        stem = self.sample_stem(index)
+        traj_path = os.path.join(self.trajectories_dir, f"{stem}.jsonl")
+        tool_path = os.path.join(self.tool_calls_dir, f"{stem}.jsonl")
+        with open(traj_path, "a", encoding="utf-8") as tf, open(
+            tool_path, "a", encoding="utf-8"
+        ) as cf:
+            for event in new_events:
+                tf.write(json.dumps(self._event_dict(event), default=str) + "\n")
+                for record in self._tool_call_records(event):
+                    cf.write(json.dumps(record, default=str) + "\n")
+            tf.flush()
+            cf.flush()
+        self._streamed[index] = len(events)
+
+    def close_stream(self, run_result: RunResult, index: int) -> Dict[str, str]:
+        """Finish a streamed sample: flush any remaining events + environment.
+
+        After this the sample is treated as fully written (``write_raw`` is a
+        no-op for it) and :meth:`append_case` can reference its artifacts.
+
+        The final on-disk artifact is reconciled to match a one-shot
+        :meth:`write_raw`: if an ``event_transform`` is configured (e.g.
+        LongMemEval collapses replay events — a decision that needs the whole
+        event list, so it can't be applied live), the trajectory file is
+        rewritten canonically now. Otherwise the streamed full events are
+        already canonical and only the header is refreshed with final values.
+        """
+        stem = self.sample_stem(index)
+        events = _events(run_result)
+        if index in self._stream_open:
+            self.stream_events(index, events)
+            self._stream_open.discard(index)
+            if self.event_transform is not None:
+                # Live file holds full events; replace it with the canonical
+                # (transformed) form so it matches write_raw exactly.
+                self._write_trajectory_jsonl(run_result, events, stem)
+                self._write_tool_calls_jsonl(events, stem)
+            else:
+                # Rewrite the header line with final values now that the sample
+                # is complete (predicted answer / latency / error were unknown
+                # at open time).
+                self._rewrite_stream_header(run_result, stem)
+        else:
+            # Never opened as a stream — fall back to a one-shot raw write.
+            self._write_trajectory_jsonl(run_result, events, stem)
+            self._write_tool_calls_jsonl(events, stem)
+        self._write_environment_json(run_result, stem)
+        self._raw_written.add(index)
+        return {
+            "trajectory": f"../raw/trajectories/{stem}.jsonl",
+            "tool_calls": f"../raw/tool_calls/{stem}.jsonl",
+            "environment": f"../raw/environments/{stem}.json",
+        }
+
+    def _rewrite_stream_header(self, run_result: RunResult, stem: str) -> None:
+        """Replace the provisional header (first line) with final values."""
+        path = os.path.join(self.trajectories_dir, f"{stem}.jsonl")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            return
+        if not lines:
+            return
+        lines[0] = json.dumps(self._trajectory_header(run_result), default=str) + "\n"
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
 
     @staticmethod
     def _event_dict(event: TrajectoryEvent) -> Dict[str, Any]:
@@ -245,17 +380,7 @@ class ExperimentRunWriter:
         path = os.path.join(self.tool_calls_dir, f"{stem}.jsonl")
         with open(path, "w", encoding="utf-8") as f:
             for event in events:
-                for tc in event.tool_calls:
-                    record = {
-                        "turn_number": event.turn_number,
-                        "tool_name": tc.tool_name,
-                        "arguments": tc.arguments,
-                        "result": tc.result,
-                        "latency_ms": tc.latency_ms,
-                        "token_count": tc.token_count,
-                        "success": event.exception is None,
-                        "exception": event.exception,
-                    }
+                for record in self._tool_call_records(event):
                     f.write(json.dumps(record, default=str) + "\n")
 
     def _write_environment_json(self, run_result: RunResult, stem: str) -> None:
