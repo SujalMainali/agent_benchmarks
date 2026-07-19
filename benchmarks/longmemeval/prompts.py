@@ -8,3 +8,19 @@ After the history, the user will ask one question, prefixed with the current dat
 - If the sessions contain updated or corrected information, answer with the latest state.
 - If the sessions do not contain the information needed, say that you do not have that information from the previous conversations. Do not guess.
 """
+
+#: Answer-format requirements the LongMemEval scorer (an LLM judge, tolerant of
+#: phrasing but strict on abstention and latest-state) depends on.
+#: Architecture-neutral: constrains only the answer's shape, never how the
+#: agent's input is structured, so it is valid appended onto a full-context,
+#: RAG, or <IS>-state agent's own prompt. Delivered via
+#: ``RuntimeSpec.format_contract`` for merge-mode drivers.
+LONGMEMEVAL_FORMAT_CONTRACT = """\
+- Answer concisely and factually in at most one or two short sentences.
+- Use specific absolute dates when the question involves time; do the date
+  arithmetic rather than repeating relative expressions.
+- If the information was later updated or corrected, answer with the latest
+  state only.
+- If you do not have the information needed, say explicitly that you do not
+  have that information from the previous conversations. Do not guess.\
+"""

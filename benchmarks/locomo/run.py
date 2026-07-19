@@ -15,6 +15,7 @@ from benchmarks.common.driver import RuntimeSpec, resolve_driver
 from benchmarks.locomo.config import load_locomo_settings
 from benchmarks.locomo.prompts import (
     LOCOMO_EVIDENCE_AWARE_PROMPT,
+    LOCOMO_FORMAT_CONTRACT,
     LOCOMO_QA_PROMPT,
     LOCOMO_STRICT_FORMAT_PROMPT,
     LOCOMO_SYSTEM_PROMPT,
@@ -40,11 +41,13 @@ def _runtime_spec(benchmark_settings) -> RuntimeSpec:
     """The runtime binding LoCoMo asks of any agent driver.
 
     ``tools=None`` means the agent may bring its own toolset — LoCoMo
-    supplies no benchmark tools of its own.
+    supplies no benchmark tools of its own. ``format_contract`` carries the
+    scorer's answer-format rules for merge-mode drivers (append, not replace).
     """
     return RuntimeSpec(
         benchmark="locomo",
         system_prompt=_select_locomo_prompt(benchmark_settings.prompt_mode),
+        format_contract=LOCOMO_FORMAT_CONTRACT,
         tools=None,
         allow_tools=benchmark_settings.allow_tools,
     )

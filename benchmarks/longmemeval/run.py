@@ -19,7 +19,10 @@ from benchmarks.longmemeval.adapter import LongMemEvalAdapter
 from benchmarks.longmemeval.config import LongMemEvalSettings, load_longmemeval_settings
 from benchmarks.longmemeval.evaluator import LongMemEvalEvaluator
 from benchmarks.longmemeval.loader import LongMemEvalLoader
-from benchmarks.longmemeval.prompts import LONGMEMEVAL_SYSTEM_PROMPT
+from benchmarks.longmemeval.prompts import (
+    LONGMEMEVAL_FORMAT_CONTRACT,
+    LONGMEMEVAL_SYSTEM_PROMPT,
+)
 from benchmarks.longmemeval.report import LongMemEvalReporter
 from benchmarks.longmemeval.runner import LongMemEvalRunner
 
@@ -29,6 +32,7 @@ def _runtime_spec(bench: LongMemEvalSettings) -> RuntimeSpec:
     return RuntimeSpec(
         benchmark="longmemeval",
         system_prompt=LONGMEMEVAL_SYSTEM_PROMPT,
+        format_contract=LONGMEMEVAL_FORMAT_CONTRACT,
         tools=None,
         allow_tools=bench.allow_tools,
     )

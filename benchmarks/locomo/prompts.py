@@ -1,5 +1,23 @@
 """LoCoMo-specific prompts and instructions."""
 
+#: Answer-format requirements the LoCoMo scorer depends on (token-overlap F1
+#: over short gold answers). Architecture-neutral: it constrains only the
+#: *shape* of the answer, never how the agent's input is structured, so it is
+#: valid appended onto a full-context, RAG, or <IS>-state agent's own prompt.
+#: Delivered via ``RuntimeSpec.format_contract`` for merge-mode drivers.
+LOCOMO_FORMAT_CONTRACT = """\
+- Reply with ONLY the shortest direct answer: a name, place, number, date,
+  or short phrase. No full sentences, no explanations, no reasoning steps,
+  no punctuation beyond what the answer itself requires.
+- Answer with exactly what the question asks for; do not add dates, names,
+  or context that was not asked about.
+- If the question asks WHEN something happened, give a specific absolute
+  date (or the most precise time you can determine), not a relative phrase
+  like "last week".
+- If you cannot determine the answer from the information available to you,
+  reply exactly: "Information not found."\
+"""
+
 LOCOMO_SYSTEM_PROMPT = """
 You are a research helper agent specialized in answering questions based on long conversation histories.
 

@@ -204,6 +204,16 @@ than pretending to support tools.
 system prompts (ToolSandbox scenario instructions, BFCL category prompts) and
 your agent must actually use the override, not merely store it.
 
+`spec.format_contract` (optional) is a **separate, additive** channel: the
+scorer's answer-format requirements (terseness, abstention phrasing, date
+format) written to be architecture-neutral — valid for a full-context, RAG,
+or state-rewriting agent alike. Unlike `system_prompt` (full replace), a
+driver SHOULD deliver it *additively* — append it to the agent's own prompt
+so the agent's identity/architecture guidance survives. It defaults to `None`
+(the benchmark authored none). The AdaMem drivers use it for their default
+`merge` prompt mode; see [Analysis.md](Analysis.md) §6.2 and
+[PromptPlan.md](PromptPlan.md).
+
 Your driver may build the agent's LLM however it likes. The reference driver
 uses the project-level provider factory (`src.llm.build_provider`, configured
 by `LLM_PROVIDER`, `OPENAI_MODEL_ID`, … in `.env`); an external agent's driver

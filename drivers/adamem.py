@@ -41,6 +41,22 @@ _SUPPORTED_BENCHMARKS = {"locomo", "longmemeval"}
 #: Continuation lines (wrapped content) don't match and stay with their turn.
 _TURN_LINE = re.compile(r"^([A-Z][A-Z_]*): (.*)$")
 
+#: Recognised prompt policies (AdaMemDrivers.md §4, PromptPlan.md §1.4).
+_PROMPT_MODES = ("native", "benchmark", "merge")
+
+#: Composes the agent's own QA prompt with the benchmark's answer-format
+#: contract (PromptPlan.md §1.3). The contract is placed LAST (recency) under
+#: a precedence header so the scorer's format rules dominate any conflicting
+#: native rule, without deleting the agent's architecture-specific guidance.
+MERGE_TEMPLATE = (
+    "{native_prompt}"
+    "\n\n# BENCHMARK ANSWER REQUIREMENTS (HIGHEST PRIORITY)\n"
+    "The following output requirements come from the benchmark scoring "
+    "system. They take precedence over any conflicting instruction above. "
+    "Follow them exactly:\n\n"
+    "{format_contract}"
+)
+
 
 class UnsupportedBenchmarkError(RuntimeError):
     """Raised when an AdaMem driver is pointed at a benchmark it can't serve."""
@@ -346,7 +362,15 @@ class AdaMemDriver(AgentDriver):
         if not self.strategy:
             raise ValueError("AdaMemDriver must be subclassed with a concrete `strategy`.")
         self.name = f"adamem_{self.strategy}"
-        self.prompt_mode = (_env("ADAMEM_PROMPT_MODE", "native") or "native").lower()
+        self.prompt_mode = (_env("ADAMEM_PROMPT_MODE", "merge") or "merge").lower()
+        if self.prompt_mode not in _PROMPT_MODES:
+            raise ValueError(
+                f"Invalid ADAMEM_PROMPT_MODE '{self.prompt_mode}'. "
+                f"Expected one of {list(_PROMPT_MODES)}."
+            )
+        #: Mode actually applied on the last create_runtime — differs from
+        #: ``prompt_mode`` only when merge falls back to native (§1.4).
+        self._effective_prompt_mode = self.prompt_mode
         self._mem1_session_ingest = (
             _env("ADAMEM_MEM1_INGEST_GRANULARITY", "session") or "session"
         ).lower() != "turn"
@@ -398,10 +422,26 @@ class AdaMemDriver(AgentDriver):
             if db_path:
                 config.db_path = db_path
 
-        # Prompt policy (AdaMemDrivers.md §4). `native` keeps each agent's own
-        # memory-format-aware QA prompt; `benchmark` swaps in the harness prompt.
-        if self.prompt_mode == "benchmark" and spec.system_prompt and hasattr(config, "qa_system_prompt"):
+        # Prompt policy (AdaMemDrivers.md §4, PromptPlan.md §1.4). `native`
+        # keeps each agent's own memory-format-aware QA prompt; `benchmark`
+        # swaps in the harness prompt (full replace); `merge` appends the
+        # benchmark's answer-format contract under a precedence header,
+        # preserving the agent's identity prompt. Effective mode is tracked
+        # so describe() can report a merge→native fallback.
+        self._effective_prompt_mode = self.prompt_mode
+        has_qa_prompt = hasattr(config, "qa_system_prompt")
+        if self.prompt_mode == "benchmark" and spec.system_prompt and has_qa_prompt:
             config.qa_system_prompt = spec.system_prompt
+        elif self.prompt_mode == "merge" and has_qa_prompt:
+            if spec.format_contract:
+                config.qa_system_prompt = MERGE_TEMPLATE.format(
+                    native_prompt=(config.qa_system_prompt or "").rstrip(),
+                    format_contract=spec.format_contract.strip(),
+                )
+            else:
+                # No contract to append (old spec / prebuilt runtime): never
+                # fall back to full override — leave the native prompt intact.
+                self._effective_prompt_mode = "merge(fallback=native)"
 
         return config
 
@@ -409,7 +449,8 @@ class AdaMemDriver(AgentDriver):
         info: Dict[str, Any] = {
             "agent_name": self.name,
             "strategy": self.strategy,
-            "prompt_mode": self.prompt_mode,
+            "prompt_mode": self._effective_prompt_mode,
+            "prompt_mode_requested": self.prompt_mode,
             "ollama_model": _env("ADAMEM_OLLAMA_MODEL", "llama3.2"),
             "ollama_host": _env("ADAMEM_OLLAMA_HOST", "http://localhost:11434"),
             "system_prompt_override_honored": self.prompt_mode == "benchmark",

@@ -29,6 +29,12 @@ class RuntimeSpec:
         benchmark: "locomo" | "longmemeval" | "bfcl" | "tool_sandbox".
         system_prompt: when set, MUST replace the agent's default system
             prompt (same load-bearing rule as ``system_prompt_override``).
+        format_contract: answer-format requirements the scorer depends on
+            (terseness, abstention phrasing, date format), authored to be
+            architecture-neutral. Drivers SHOULD deliver it *additively*
+            (append to the agent's own prompt) rather than replacing —
+            unlike ``system_prompt``. ``None`` means the benchmark authored
+            none. See AgentInterface.md §3.
         tools: benchmark-supplied langchain ``StructuredTool``s. ``None``
             means "no benchmark tools — the agent may use its own toolset";
             a list (possibly empty) means "advertise exactly these".
@@ -40,6 +46,7 @@ class RuntimeSpec:
 
     benchmark: str
     system_prompt: Optional[str] = None
+    format_contract: Optional[str] = None
     tools: Optional[List[Any]] = None
     allow_tools: bool = True
     max_tool_steps: Optional[int] = None
