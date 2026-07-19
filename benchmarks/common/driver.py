@@ -80,6 +80,9 @@ class AgentDriver(ABC):
 #: entirely by setting AGENT_DRIVER to a raw "pkg.module:ClassName" path.
 _REGISTRY: Dict[str, str] = {
     "research_helper": "drivers.research_helper:ResearchHelperDriver",
+    "adamem_flat_rag": "drivers.adamem:AdaMemFlatRAGDriver",
+    "adamem_episodic": "drivers.adamem:AdaMemEpisodicDriver",
+    "adamem_mem1": "drivers.adamem:AdaMemMem1Driver",
 }
 
 

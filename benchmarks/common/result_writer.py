@@ -65,18 +65,21 @@ def resolve_memory_architecture() -> str:
 def resolve_agent_name(default: str = "research_helper") -> str:
     """Human-facing agent label recorded in the experiment index.
 
-    Precedence: explicit ``AGENT_NAME`` env var, then the ``AGENT_DRIVER``
-    selection (registry key, or class name of a raw import path), then the
-    default. Callers that hold a resolved driver should pass
-    ``agent_name=driver.name`` instead of relying on this fallback.
+    Precedence: explicit ``AGENT_NAME`` env var, then ``default`` if a caller
+    supplied one (e.g. a resolved ``driver.name``), then the ``AGENT_DRIVER``
+    selection (registry key, or class name of a raw import path), then
+    ``"research_helper"``. Passing ``AGENT_NAME`` therefore always overrides
+    the driver's own name, which is what the ``.env`` knob is for.
     """
     explicit = os.getenv("AGENT_NAME", "").split("#", 1)[0].strip()
     if explicit:
         return explicit
+    if default:
+        return default
     driver_key = os.getenv("AGENT_DRIVER", "").split("#", 1)[0].strip()
     if driver_key:
         return driver_key.rsplit(":", 1)[-1] if ":" in driver_key else driver_key
-    return default
+    return "research_helper"
 
 
 def _as_serializable(value: Any) -> Any:
@@ -115,7 +118,9 @@ class ExperimentRunWriter:
         self.dataset = dataset
         self.benchmark_version = benchmark_version
         self.memory_architecture = memory_architecture or resolve_memory_architecture()
-        self.agent_name = agent_name or resolve_agent_name()
+        # AGENT_NAME env always wins; otherwise the caller's driver name; else
+        # the AGENT_DRIVER key / default (see resolve_agent_name).
+        self.agent_name = resolve_agent_name(agent_name or "")
         self.run_metadata = run_metadata or {}
         # Optional hook: ``(run_result, events) -> list`` to trim/annotate the
         # per-event stream before it is written (e.g. LongMemEval collapses its

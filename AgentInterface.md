@@ -194,6 +194,12 @@ the **binding** each benchmark requests and how often it asks:
 The LoCoMo/LongMemEval runners also still accept a prebuilt `AgentRuntime`
 directly (duck-typed on `reset`/`act`) for tests and ad-hoc use.
 
+A driver may legitimately be **QA-only**: an agent with no tool support can
+serve just LoCoMo and LongMemEval and raise on any other benchmark (or on a
+spec carrying `tools`). The AdaMem memory agents do exactly this — see
+[AdaMemDrivers.md](AdaMemDrivers.md) — failing fast with a clear message rather
+than pretending to support tools.
+
 `spec.system_prompt` is load-bearing: benchmarks build scenario-specific
 system prompts (ToolSandbox scenario instructions, BFCL category prompts) and
 your agent must actually use the override, not merely store it.
